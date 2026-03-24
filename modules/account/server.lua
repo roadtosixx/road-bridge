@@ -14,10 +14,19 @@ local function EnsureFrameworkReady()
     end
 end
 
+-- Normalize money type across frameworks
+-- QBCore uses 'cash', ESX uses 'money' for the same thing
+local function normalizeMoneyType(moneyType)
+    if Bridge.Framework == 'esx' and moneyType == 'cash' then
+        return 'money'
+    end
+    return moneyType
+end
+
 -- Get account balance
 function Bridge.Account.GetBalance(source, accountType)
     EnsureFrameworkReady()
-    accountType = accountType or 'bank'
+    accountType = normalizeMoneyType(accountType or 'bank')
 
     if Bridge.Framework == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
@@ -46,7 +55,7 @@ end
 -- Add money to account
 function Bridge.Account.AddMoney(source, accountType, amount, reason)
     EnsureFrameworkReady()
-    accountType = accountType or 'bank'
+    accountType = normalizeMoneyType(accountType or 'bank')
     reason = reason or 'Unknown'
 
     if Bridge.Framework == 'esx' then
@@ -77,7 +86,7 @@ end
 -- Remove money from account
 function Bridge.Account.RemoveMoney(source, accountType, amount, reason)
     EnsureFrameworkReady()
-    accountType = accountType or 'bank'
+    accountType = normalizeMoneyType(accountType or 'bank')
     reason = reason or 'Unknown'
 
     if Bridge.Framework == 'esx' then
@@ -108,7 +117,7 @@ end
 -- Set account balance
 function Bridge.Account.SetMoney(source, accountType, amount)
     EnsureFrameworkReady()
-    accountType = accountType or 'bank'
+    accountType = normalizeMoneyType(accountType or 'bank')
 
     if Bridge.Framework == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)

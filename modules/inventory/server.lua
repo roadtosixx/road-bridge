@@ -253,17 +253,25 @@ function Bridge.Inventory.GetItemWithMetadata(source, itemName, metadataFilter)
             end
         end
     elseif inventorySystem == 'jaksam' then
-        -- jaksam: We need to search ALL items of this type and filter by metadata
-        local success, allItems = pcall(function()
-            return exports['jaksam_inventory']:getItemsByName(source, itemName)
+        local success, items = pcall(function()
+            return exports['jaksam_inventory']:getItemsByName(source, itemName, metadataFilter)
         end)
+        if success and items then
+            for _, item in ipairs(items) do
+                if item then
+                    return item, item.slot
+                end
+            end
+        end
 
-        if success and allItems and type(allItems) == 'table' then
-            -- Check if we got multiple items or just one
+    elseif inventorySystem == 'core_inventory' then
+        local success, items = pcall(function()
+            return exports['core_inventory']:getItems(source, itemName)
+        end)
+        if success and items and type(items) == 'table' then
             if metadataFilter then
-                -- Filter by metadata
-                for slotId, item in pairs(allItems) do
-                    if item and item.metadata then
+                for _, item in pairs(items) do
+                    if item.metadata then
                         local matches = true
                         for key, value in pairs(metadataFilter) do
                             if tostring(item.metadata[key]) ~= tostring(value) then
@@ -272,38 +280,15 @@ function Bridge.Inventory.GetItemWithMetadata(source, itemName, metadataFilter)
                             end
                         end
                         if matches then
-                            return item, slotId
+                            return item, item.slot
                         end
                     end
                 end
             else
-                -- Return first found item
-                for slotId, item in pairs(allItems) do
-                    return item, slotId
+                for _, item in pairs(items) do
+                    return item, item.slot
                 end
             end
-        end
-
-        -- Fallback: Try single item lookup (getItemByName)
-        local data, slotId = exports['jaksam_inventory']:getItemByName(source, itemName)
-        if data then
-            if metadataFilter then
-                -- Check if metadata matches
-                if data.metadata then
-                    local matches = true
-                    for key, value in pairs(metadataFilter) do
-                        if tostring(data.metadata[key]) ~= tostring(value) then
-                            matches = false
-                            break
-                        end
-                    end
-                    if matches then
-                        return data, slotId
-                    end
-                end
-                return nil, nil -- No match
-            end
-            return data, slotId
         end
     end
 
@@ -326,6 +311,13 @@ function Bridge.Inventory.GetItemFromSlot(source, slot)
     elseif inventorySystem == 'jaksam' then
         local success, item = pcall(function()
             return exports['jaksam_inventory']:getItemFromSlot(source, slot)
+        end)
+        if success and item then
+            return item
+        end
+    elseif inventorySystem == 'core_inventory' then
+        local success, item = pcall(function()
+            return exports['core_inventory']:getItemBySlot(source, slot)
         end)
         if success and item then
             return item
@@ -370,6 +362,19 @@ function Bridge.Inventory.GetItemMetadata(source, itemName, slot)
             local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
             return item and item.metadata or {}
         end
+    elseif inventorySystem == 'core_inventory' then
+        if slot then
+            local success, item = pcall(function()
+                return exports['core_inventory']:getItemBySlot(source, slot)
+            end)
+            if success and item and item.name == itemName then
+                return item.metadata or {}
+            end
+            return {}
+        else
+            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
+            return item and item.metadata or {}
+        end
     end
 
     return {}
@@ -403,6 +408,18 @@ function Bridge.Inventory.UpdateItemMetadata(source, itemName, slot, newMetadata
         if slot then
             local result = exports['jaksam_inventory']:setItemMetadataInSlot(source, slot, newMetadata)
             return result
+        end
+    elseif inventorySystem == 'core_inventory' then
+        if not slot then
+            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
+            slot = foundSlot
+        end
+
+        if slot then
+            local success = pcall(function()
+                exports['core_inventory']:setMetadata(source, slot, newMetadata)
+            end)
+            return success
         end
     end
 

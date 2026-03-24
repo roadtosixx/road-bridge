@@ -2,6 +2,7 @@
 
 Bridge = Bridge or {}
 Bridge.Job = Bridge.Job or {}
+Bridge.Job.UnemployedJob = Bridge.Job.UnemployedJob or 'unemployed'
 
 -- Helper: Ensure framework is ready
 local function EnsureFrameworkReady()
@@ -25,7 +26,7 @@ function Bridge.Job.GetJob()
         return playerData.job or {}
     elseif Bridge.Framework == 'standalone' then
         return {
-            name = 'unemployed',
+            name = Bridge.Job.UnemployedJob,
             label = 'Unemployed',
             grade = 0
         }
@@ -37,7 +38,7 @@ end
 function Bridge.Job.GetJobName()
     EnsureFrameworkReady()
     local job = Bridge.Job.GetJob()
-    return job.name or 'unemployed'
+    return job.name or Bridge.Job.UnemployedJob
 end
 
 -- Get job label

@@ -94,7 +94,7 @@ function Bridge.GetJob()
         return playerData.job or {}
     elseif Bridge.Framework == 'standalone' then
         return {
-            name = 'unemployed',
+            name = Bridge.Job.UnemployedJob or 'unemployed',
             label = 'Unemployed'
         }
     end

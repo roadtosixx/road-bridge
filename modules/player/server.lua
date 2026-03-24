@@ -148,8 +148,18 @@ function Bridge.Player.GetPlayers()
 end
 
 -- Add money to player
+-- Normalize money type across frameworks
+-- QBCore uses 'cash', ESX uses 'money' for the same thing
+local function normalizeMoneyType(moneyType)
+    if Bridge.Framework == 'esx' and moneyType == 'cash' then
+        return 'money'
+    end
+    return moneyType
+end
+
 function Bridge.Player.AddMoney(source, moneyType, amount)
     EnsureFrameworkReady()
+    moneyType = normalizeMoneyType(moneyType)
 
     if Bridge.Framework == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
@@ -180,6 +190,7 @@ end
 -- Remove money from player
 function Bridge.Player.RemoveMoney(source, moneyType, amount)
     EnsureFrameworkReady()
+    moneyType = normalizeMoneyType(moneyType)
 
     if Bridge.Framework == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
@@ -209,11 +220,13 @@ end
 -- Get player money
 function Bridge.Player.GetMoney(source, moneyType)
     EnsureFrameworkReady()
+    moneyType = normalizeMoneyType(moneyType)
 
     if Bridge.Framework == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
         if xPlayer then
-            return xPlayer.getAccount(moneyType).money
+            local account = xPlayer.getAccount(moneyType)
+            return account and account.money or 0
         end
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)

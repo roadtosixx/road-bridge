@@ -2,6 +2,7 @@
 
 Bridge = Bridge or {}
 Bridge.Job = {}
+Bridge.Job.UnemployedJob = 'unemployed'
 
 -- Helper: Ensure framework is ready
 local function EnsureFrameworkReady()
@@ -35,7 +36,7 @@ function Bridge.Job.GetJob(source)
         end
     elseif Bridge.Framework == 'standalone' then
         return {
-            name = 'unemployed',
+            name = Bridge.Job.UnemployedJob,
             label = 'Unemployed',
             grade = 0
         }
@@ -72,6 +73,28 @@ function Bridge.Job.SetJob(source, jobName, grade)
     return false
 end
 
+-- Set job for offline player via database (by identifier)
+function Bridge.Job.SetJobOffline(identifier, jobName, grade)
+    EnsureFrameworkReady()
+    grade = grade or 0
+
+    if Bridge.Framework == 'esx' then
+        MySQL.Async.execute(
+            'UPDATE ' .. Bridge.UserTable .. ' SET job = @job, job_grade = @grade WHERE ' .. Bridge.IdentifierColumn .. ' = @identifier',
+            { ['@job'] = jobName, ['@grade'] = grade, ['@identifier'] = identifier }
+        )
+        return true
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        MySQL.Async.execute(
+            'UPDATE ' .. Bridge.UserTable .. ' SET job = JSON_SET(job, "$.name", @job, "$.grade.level", @grade) WHERE ' .. Bridge.IdentifierColumn .. ' = @identifier',
+            { ['@job'] = jobName, ['@grade'] = grade, ['@identifier'] = identifier }
+        )
+        return true
+    end
+
+    return false
+end
+
 -- Check if player has job
 function Bridge.Job.HasJob(source, jobName, minGrade)
     EnsureFrameworkReady()
@@ -104,6 +127,22 @@ function Bridge.Job.GetGrade(source)
     end
 
     return 0
+end
+
+-- Check if player is boss/management
+function Bridge.Job.IsBoss(source)
+    EnsureFrameworkReady()
+    local job = Bridge.Job.GetJob(source)
+
+    if not job then return false end
+
+    if Bridge.Framework == 'esx' then
+        return job.grade_name == 'boss'
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        return job.isboss or false
+    end
+
+    return false
 end
 
 -- Set job duty status
