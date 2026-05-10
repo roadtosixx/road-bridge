@@ -17,27 +17,27 @@ local readyCallbacks = {}
 -- Framework Detection
 local function DetectFramework()
 
-    -- Qbox Detection (must be before QBCore, as Qbox also starts qb-core as compatibility layer)
-    -- Qbox provides qb-core compatibility bridge, so we use that for the core object
-   --[[ if GetResourceState('qbx_core') == 'started' then
-        print('^3[Bridge DEBUG]^7 Qbox resource is started, getting QBCore object from compatibility bridge...')
-        local success, err = pcall(function()
-            QBCore = exports['qb-core']:GetCoreObject()
-            Bridge.FrameworkObject = QBCore
-            Bridge.FrameworkExport = exports.qbx_core
+    -- Qbox Detection (must run before QBCore — Qbox can optionally start qb-core
+    -- as a compatibility layer, but the canonical export is qbx_core).
+    if GetResourceState('qbx_core') == 'started' then
+        Bridge.FrameworkExport = exports.qbx_core
+        -- qb-core compat object is optional on modern Qbox — try to grab it for
+        -- code paths that still use Bridge.FrameworkObject.Functions.* (vehicle
+        -- properties, inventory native fallback). Nil on pure Qbox is fine.
+        pcall(function()
+            if GetResourceState('qb-core') == 'started' then
+                QBCore = exports['qb-core']:GetCoreObject()
+                Bridge.FrameworkObject = QBCore
+            end
         end)
-        print('^3[Bridge DEBUG]^7 Qbox pcall success: ' .. tostring(success) .. ', error: ' .. tostring(err))
-        print('^3[Bridge DEBUG]^7 Bridge.FrameworkObject: ' .. tostring(Bridge.FrameworkObject))
-        if success and Bridge.FrameworkObject then
-            Bridge.Framework = 'qbox'
-            Bridge.UserTable = 'players'
-            Bridge.IdentifierColumn = 'citizenid'
-            Bridge.VehiclesTable = 'player_vehicles'
-            Bridge.VehiclesOwnerColumn = 'citizenid'
-            print('^2[Bridge]^7 Qbox Framework detected')
-            return true
-        end
-    end--]]
+        Bridge.Framework = 'qbox'
+        Bridge.UserTable = 'players'
+        Bridge.IdentifierColumn = 'citizenid'
+        Bridge.VehiclesTable = 'player_vehicles'
+        Bridge.VehiclesOwnerColumn = 'citizenid'
+        print('^2[Bridge]^7 Qbox Framework detected')
+        return true
+    end
 
     -- ESX Detection
     if GetResourceState('es_extended') == 'started' then
@@ -69,7 +69,7 @@ local function DetectFramework()
             Bridge.IdentifierColumn = 'citizenid'
             Bridge.VehiclesTable = 'player_vehicles'
             Bridge.VehiclesOwnerColumn = 'citizenid'
-            print('^2[Bridge]^7 QBCore / QBOX Framework detected')
+            print('^2[Bridge]^7 QBCore Framework detected')
             return true
         end
     end

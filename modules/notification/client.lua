@@ -41,7 +41,9 @@ function Bridge.Notification.ShowAdvanced(title, message, type, duration)
     elseif Bridge.Framework == 'qbcore' then
         QBCore.Functions.Notify(message, type or 'primary', duration or 5000)
     elseif Bridge.Framework == 'qbox' then
-        exports.qbx_core:Notify({
+        -- qbx_core:Notify table form is { text, caption } only — title/description
+        -- belongs to ox_lib's lib.notify, which Qbox uses under the hood.
+        lib.notify({
             title = title,
             description = message,
             type = type or 'inform',

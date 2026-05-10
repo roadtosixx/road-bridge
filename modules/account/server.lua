@@ -174,7 +174,12 @@ function Bridge.Account.GetAccounts(source)
         if xPlayer then
             return xPlayer.getAccounts()
         end
-    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+    elseif Bridge.Framework == 'qbcore' then
+        local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
+        if player then
+            return player.PlayerData.money
+        end
+    elseif Bridge.Framework == 'qbox' then
         local player = Bridge.FrameworkExport:GetPlayer(source)
         if player then
             return player.PlayerData.money

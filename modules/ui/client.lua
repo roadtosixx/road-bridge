@@ -90,7 +90,7 @@ function Bridge.UI.ShowTextUI(message, type)
     elseif Bridge.Framework == 'qbcore' then
         exports['qb-core']:DrawText(message, type)
     elseif Bridge.Framework == 'qbox' then
-        exports['qb-core']:DrawText(message, type)
+        lib.showTextUI(message)
     elseif Bridge.Framework == 'standalone' then
         -- Fallback: Use help notification
         Bridge.UI.ShowHelpNotification(message)
@@ -106,7 +106,7 @@ function Bridge.UI.HideTextUI()
     elseif Bridge.Framework == 'qbcore' then
         exports['qb-core']:HideText()
     elseif Bridge.Framework == 'qbox' then
-        exports['qb-core']:HideText()
+        lib.hideTextUI()
     elseif Bridge.Framework == 'standalone' then
         -- Nothing to do
     end

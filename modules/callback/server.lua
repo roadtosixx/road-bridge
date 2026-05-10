@@ -23,7 +23,17 @@ function Bridge.RegisterCallback(name, callback)
     elseif Bridge.Framework == 'qbcore' then
         QBCore.Functions.CreateCallback(name, callback)
     elseif Bridge.Framework == 'qbox' then
-        lib.callback.register(name, callback)
+        -- ox_lib uses return-values, but the bridge contract is cb-style.
+        -- Wrap so registered handlers can keep calling cb(...) (sync or async)
+        -- and we forward the captured values as ox_lib's return.
+        lib.callback.register(name, function(source, ...)
+            local p = promise.new()
+            callback(source, function(...)
+                p:resolve(table.pack(...))
+            end, ...)
+            local result = Citizen.Await(p)
+            return table.unpack(result, 1, result.n)
+        end)
     elseif Bridge.Framework == 'standalone' then
         -- Standalone Callback System
         RegisterNetEvent('bridge:callback:' .. name, function(requestId, ...)
