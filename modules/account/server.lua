@@ -40,12 +40,9 @@ function Bridge.Account.GetBalance(source, accountType)
             return player.PlayerData.money[accountType] or 0
         end
     elseif Bridge.Framework == 'qbox' then
-        local identifier = Bridge.Player.GetIdentifier(source)
-        if identifier then
-            local money = Bridge.FrameworkExport:GetMoney(identifier, accountType)
-            return money or 0
-        end
-        return 0
+        -- qbx_core money exports accept Source|string directly
+        local money = Bridge.FrameworkExport:GetMoney(source, accountType)
+        return money or 0
     elseif Bridge.Framework == 'standalone' then
         return 0
     end
@@ -71,11 +68,8 @@ function Bridge.Account.AddMoney(source, accountType, amount, reason)
             return true
         end
     elseif Bridge.Framework == 'qbox' then
-        local identifier = Bridge.Player.GetIdentifier(source)
-        if identifier then
-            return Bridge.FrameworkExport:AddMoney(identifier, accountType, amount, reason)
-        end
-        return false
+        -- qbx_core money exports accept Source|string directly
+        return Bridge.FrameworkExport:AddMoney(source, accountType, amount, reason)
     elseif Bridge.Framework == 'standalone' then
         print('[Bridge] Standalone: AddMoney not implemented')
         return false
@@ -102,11 +96,8 @@ function Bridge.Account.RemoveMoney(source, accountType, amount, reason)
             return true
         end
     elseif Bridge.Framework == 'qbox' then
-        local identifier = Bridge.Player.GetIdentifier(source)
-        if identifier then
-            return Bridge.FrameworkExport:RemoveMoney(identifier, accountType, amount, reason)
-        end
-        return false
+        -- qbx_core money exports accept Source|string directly
+        return Bridge.FrameworkExport:RemoveMoney(source, accountType, amount, reason)
     elseif Bridge.Framework == 'standalone' then
         print('[Bridge] Standalone: RemoveMoney not implemented')
         return false
@@ -132,11 +123,8 @@ function Bridge.Account.SetMoney(source, accountType, amount)
             return true
         end
     elseif Bridge.Framework == 'qbox' then
-        local identifier = Bridge.Player.GetIdentifier(source)
-        if identifier then
-            return Bridge.FrameworkExport:SetMoney(identifier, accountType, amount)
-        end
-        return false
+        -- qbx_core money exports accept Source|string directly
+        return Bridge.FrameworkExport:SetMoney(source, accountType, amount)
     elseif Bridge.Framework == 'standalone' then
         print('[Bridge] Standalone: SetMoney not implemented')
         return false
@@ -159,9 +147,14 @@ function Bridge.Account.TransferMoney(source, fromAccount, toAccount, amount)
     end
     
     if Bridge.Account.RemoveMoney(source, fromAccount, amount, 'Transfer to ' .. toAccount) then
-        return Bridge.Account.AddMoney(source, toAccount, amount, 'Transfer from ' .. fromAccount)
+        if Bridge.Account.AddMoney(source, toAccount, amount, 'Transfer from ' .. fromAccount) then
+            return true
+        end
+        -- Rollback: re-add to the source account if the deposit failed
+        Bridge.Account.AddMoney(source, fromAccount, amount, 'Transfer rollback')
+        return false
     end
-    
+
     return false
 end
 
@@ -194,11 +187,85 @@ end
 -- Society Account Functions
 -- ============================================
 
+-- okokBanking keys societies by the bare job name — both its own
+-- Config.Societies and the okokbanking_societies table use 'police', not
+-- 'society_police'. With Config.UseAddonAccount = true it proxies to
+-- esx_addonaccount instead, which DOES use the prefix, so on ESX both spellings
+-- are tried and the one okok actually knows wins.
+local function okokSocietyNames(accountName)
+    local bare = (accountName:gsub('^society_', ''))
+    if Bridge.Framework == 'esx' then
+        return { bare, 'society_' .. bare }
+    end
+    return { bare }
+end
+
+-- okokBanking's GetAccount returns the balance directly on some versions and the
+-- okokbanking_societies row (or a one-row result set) on others. That row keeps
+-- the balance in `value` — the same column bank.lua already reads for
+-- transactions. Returns nil when no balance could be read, which is what
+-- separates "society unknown" from "society is empty".
+local okokAccountBalance
+okokAccountBalance = function(account)
+    if type(account) == 'number' then
+        return account
+    elseif type(account) == 'string' then
+        return tonumber(account)
+    elseif type(account) == 'table' then
+        if type(account[1]) == 'table' then
+            return okokAccountBalance(account[1])
+        end
+        return tonumber(account.value or account.money or account.amount or account.balance)
+    end
+    return nil
+end
+
+-- Resolve a society to the name okokBanking knows plus its balance. A name that
+-- reports actual money wins; otherwise the first name that answered at all is
+-- kept so deposits still land on an empty-but-existing account.
+-- @return string?, number? - resolved name and balance, nil when unresolvable
+local function okokResolveSociety(accountName)
+    local fallbackName, fallbackBalance, firstError
+
+    for _, name in ipairs(okokSocietyNames(accountName)) do
+        local ok, account = pcall(function()
+            return exports['okokBanking']:GetAccount(name)
+        end)
+
+        if ok then
+            local balance = okokAccountBalance(account)
+            if balance and balance > 0 then
+                return name, balance
+            end
+            if balance and not fallbackName then
+                fallbackName, fallbackBalance = name, balance
+            end
+        elseif not firstError then
+            firstError = account
+        end
+    end
+
+    if fallbackName then
+        return fallbackName, fallbackBalance
+    end
+
+    print(('[RoadPhone] okokBanking: could not read society "%s"%s'):format(
+        accountName, firstError and (' - ' .. tostring(firstError)) or ''))
+    return nil
+end
+
 -- Get society account balance
 -- @param accountName string - The society account name (e.g., 'society_taxi', 'taxi')
 -- @return number - The balance of the society account
 function Bridge.Account.GetSocietyBalance(accountName)
     EnsureFrameworkReady()
+
+    -- okokBanking is the society source of truth when enabled (overrides the
+    -- per-framework management/banking resources below).
+    if Config.okokBanking then
+        local _, balance = okokResolveSociety(accountName)
+        return balance or 0
+    end
 
     -- Normalize account name (ensure 'society_' prefix for ESX)
     local function normalizeName(name)
@@ -222,6 +289,11 @@ function Bridge.Account.GetSocietyBalance(accountName)
         TriggerEvent('esx_addonaccount:getSharedAccount', normalizedName, function(acc)
             account = acc
             p:resolve(acc)
+        end)
+
+        -- Guard: resolve nil if esx_addonaccount never answers (resource absent)
+        SetTimeout(2000, function()
+            p:resolve(nil)
         end)
 
         -- Wait for callback with timeout
@@ -291,6 +363,15 @@ function Bridge.Account.AddSocietyMoney(accountName, amount, reason)
     EnsureFrameworkReady()
     reason = reason or 'Phone Payment'
 
+    -- okokBanking is the society source of truth when enabled.
+    if Config.okokBanking then
+        local name = okokResolveSociety(accountName) or okokSocietyNames(accountName)[1]
+        local ok, result = pcall(function()
+            return exports['okokBanking']:AddMoney(name, amount)
+        end)
+        return ok and result ~= false
+    end
+
     -- Normalize account name
     local function normalizeName(name)
         if Bridge.Framework == 'esx' then
@@ -317,7 +398,12 @@ function Bridge.Account.AddSocietyMoney(accountName, amount, reason)
             p:resolve(success)
         end)
 
-        return Citizen.Await(p)
+        -- Guard: resolve false if esx_addonaccount never answers (resource absent)
+        SetTimeout(2000, function()
+            p:resolve(false)
+        end)
+
+        return Citizen.Await(p) or false
 
     elseif Bridge.Framework == 'qbcore' then
         local success, result = pcall(function()
@@ -368,6 +454,15 @@ function Bridge.Account.RemoveSocietyMoney(accountName, amount, reason)
     EnsureFrameworkReady()
     reason = reason or 'Phone Payment'
 
+    -- okokBanking is the society source of truth when enabled.
+    if Config.okokBanking then
+        local name = okokResolveSociety(accountName) or okokSocietyNames(accountName)[1]
+        local ok, result = pcall(function()
+            return exports['okokBanking']:RemoveMoney(name, amount)
+        end)
+        return ok and result ~= false
+    end
+
     -- Normalize account name
     local function normalizeName(name)
         if Bridge.Framework == 'esx' then
@@ -394,7 +489,12 @@ function Bridge.Account.RemoveSocietyMoney(accountName, amount, reason)
             p:resolve(success)
         end)
 
-        return Citizen.Await(p)
+        -- Guard: resolve false if esx_addonaccount never answers (resource absent)
+        SetTimeout(2000, function()
+            p:resolve(false)
+        end)
+
+        return Citizen.Await(p) or false
 
     elseif Bridge.Framework == 'qbcore' then
         local success, result = pcall(function()

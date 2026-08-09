@@ -28,9 +28,13 @@ function Bridge.RegisterCallback(name, callback)
         -- and we forward the captured values as ox_lib's return.
         lib.callback.register(name, function(source, ...)
             local p = promise.new()
-            callback(source, function(...)
+            local ok, err = pcall(callback, source, function(...)
                 p:resolve(table.pack(...))
             end, ...)
+            if not ok then
+                print('^1[Bridge Callback]^7 Error in callback "' .. name .. '": ' .. tostring(err))
+                p:resolve(table.pack(nil))
+            end
             local result = Citizen.Await(p)
             return table.unpack(result, 1, result.n)
         end)

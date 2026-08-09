@@ -32,10 +32,19 @@ function Bridge.TriggerCallback(name, callback, ...)
 
         RegisterNetEvent(eventName)
         eventHandler = AddEventHandler(eventName, function(...)
-            callback(...)
             -- Cleanup event handler after use
             if eventHandler then
                 RemoveEventHandler(eventHandler)
+                eventHandler = nil
+            end
+            callback(...)
+        end)
+
+        -- Cleanup after timeout so unanswered callbacks don't leak handlers
+        SetTimeout(10000, function()
+            if eventHandler then
+                RemoveEventHandler(eventHandler)
+                eventHandler = nil
             end
         end)
 

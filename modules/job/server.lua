@@ -150,8 +150,7 @@ function Bridge.Job.SetDuty(source, onDuty)
     EnsureFrameworkReady()
 
     if Bridge.Framework == 'esx' then
-        -- ESX has no duty system by default
-        TriggerClientEvent('esx:setJob', source, onDuty)
+        -- ESX has no duty system by default - no-op
         return true
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
@@ -208,9 +207,8 @@ function Bridge.Job.GetPlayersWithJob(jobName, minGrade)
             end
         end
     elseif Bridge.Framework == 'qbcore' then
-        local allPlayers = Bridge.FrameworkObject.Functions.GetPlayers()
-        for _, source in ipairs(allPlayers) do
-            local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
+        local qbPlayers = Bridge.FrameworkObject.Functions.GetQBPlayers()
+        for source, player in pairs(qbPlayers) do
             if player and player.PlayerData.job.name == jobName then
                 local grade = player.PlayerData.job.grade and player.PlayerData.job.grade.level or 0
                 if grade >= minGrade then
@@ -250,9 +248,8 @@ function Bridge.Job.GetPlayersByJob(jobName, minGrade)
             end
         end
     elseif Bridge.Framework == 'qbcore' then
-        local allPlayers = Bridge.FrameworkObject.Functions.GetPlayers()
-        for _, source in ipairs(allPlayers) do
-            local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
+        local qbPlayers = Bridge.FrameworkObject.Functions.GetQBPlayers()
+        for source, player in pairs(qbPlayers) do
             if player and player.PlayerData.job.name == jobName then
                 local grade = player.PlayerData.job.grade and player.PlayerData.job.grade.level or 0
                 if grade >= minGrade then
@@ -295,9 +292,8 @@ function Bridge.Job.GetOnDutyCount(jobName)
         return count
     elseif Bridge.Framework == 'qbcore' then
         local count = 0
-        local allPlayers = Bridge.FrameworkObject.Functions.GetPlayers()
-        for _, source in ipairs(allPlayers) do
-            local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
+        local qbPlayers = Bridge.FrameworkObject.Functions.GetQBPlayers()
+        for _, player in pairs(qbPlayers) do
             if player and player.PlayerData.job.name == jobName and player.PlayerData.job.onduty then
                 count = count + 1
             end

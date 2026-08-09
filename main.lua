@@ -74,7 +74,21 @@ local function DetectFramework()
         end
     end
 
-    -- Standalone (no framework)
+    -- No framework detected (yet) - the init thread decides when to fall
+    -- back to standalone.
+    return false
+end
+
+-- True while a known framework resource is still starting up - in that case
+-- detection should retry instead of locking into the wrong mode.
+local function IsFrameworkStarting()
+    return GetResourceState('es_extended') == 'starting'
+        or GetResourceState('qbx_core') == 'starting'
+        or GetResourceState('qb-core') == 'starting'
+end
+
+-- Standalone fallback (no framework)
+local function SetStandalone()
     Bridge.Framework = 'standalone'
     Bridge.UserTable = 'users'
     Bridge.IdentifierColumn = 'identifier'
@@ -88,12 +102,18 @@ local function DetectFramework()
     print('^1[Bridge WARNING]^7   - Bridge.VehiclesTable (default: "owned_vehicles")')
     print('^1[Bridge WARNING]^7   - Bridge.VehiclesOwnerColumn (default: "owner")')
     print('^1[Bridge WARNING]^7 Remove this warning once you have configured your tables.')
-    return true
 end
 
 -- Initialization
 CreateThread(function()
+    local attempts = 0
+    local maxAttempts = 20
     while not DetectFramework() do
+        attempts = attempts + 1
+        if attempts >= maxAttempts or not IsFrameworkStarting() then
+            SetStandalone()
+            break
+        end
         Wait(500)
     end
 
@@ -138,9 +158,24 @@ function Bridge.Await(callback)
     end
 end
 
--- Synchronous wait (for simple access)
+-- Synchronous wait (for simple access).
+--
+-- Bounded. The init thread above always reaches `Bridge.Ready = true` — either
+-- through detection or through SetStandalone — but if it ever dies before that
+-- line, an unbounded wait here would freeze every module that guards on it, and
+-- the resource would look "started" while doing nothing at all.
 function Bridge.WaitForReady()
-    while not Bridge.Ready do
+    if Bridge.Ready then return true end
+
+    if Bridge.WaitFor then
+        return (Bridge.WaitFor(function() return Bridge.Ready end, 20000, 'Bridge initialization'))
+    end
+
+    -- helpers.lua not loaded yet (very early call): plain bounded fallback
+    local deadline = GetGameTimer() + 20000
+    while not Bridge.Ready and GetGameTimer() < deadline do
         Wait(100)
     end
+
+    return Bridge.Ready == true
 end

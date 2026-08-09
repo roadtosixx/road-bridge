@@ -5,15 +5,137 @@ Bridge.Inventory = {}
 Bridge.Inventory.System = nil
 Bridge.Inventory.Ready = false
 
+--- Read an item's per-slot data, whatever the inventory calls it.
+---
+--- `metadata` is ALWAYS preferred. Only qb-derived inventories keep this data
+--- in `info` (qb-inventory is the documented case — our own write path uses
+--- SetItemData(..., 'info', ...) there), so only those may fall back to it.
+--- ox / jaksam / one_inventory have no `info` field at all.
+---
+--- Why this exists: 20 call sites used to write `item.metadata or item.info`
+--- by hand — some the other way round. That picks the EMPTY table whenever the
+--- first field exists but is empty, because `{}` is truthy in Lua. Reading the
+--- wrong field makes a configured phone look brand new, so it gets a fresh
+--- number assigned on every open.
+---
+--- Always returns a table.
+local INFO_BASED_SYSTEMS = {
+    ['qb-inventory'] = true,
+    codem = true,
+    core_inventory = true,
+    -- tgiann is qb-derived and hands out BOTH fields: `metadata` as an empty
+    -- table and the real payload in `info`. Reading `metadata` only made every
+    -- configured phone look brand new — a fresh number was assigned on every
+    -- open and each write seemed to vanish. `metadata` still wins whenever it
+    -- actually holds something, so nothing changes for setups that use it.
+    tgiann = true,
+}
+
+-- ============================================================================
+-- tgiann metadata write — VERIFIED
+-- ----------------------------------------------------------------------------
+-- tgiann's UpdateItemMetadata accepts the call, returns nothing and can persist
+-- NOTHING, without raising an error. A silently dropped write means the phone
+-- item never keeps its number: every open assigns a new one and nothing ever
+-- sticks. So this path does not assume success — it checks whether the write
+-- actually landed, and remembers which call shape works.
+--
+--   'name' — UpdateItemMetadata(src, itemName, slot, metadata)   (documented)
+--   'item' — UpdateItemMetadata(src, itemTable, slot, metadata)  (item object)
+--
+-- The check runs until one shape is proven; from then on the winner is used
+-- directly, so the read-back costs nothing in normal operation.
+-- ============================================================================
+local tgiannWriteShape = nil
+
+local function TgiannReadSlot(source, slot)
+    local ok, item = pcall(function()
+        return exports['tgiann-inventory']:GetItemBySlot(source, slot)
+    end)
+
+    if not ok then return nil end
+    return item
+end
+
+-- Did the data we wrote actually arrive? Compares the first scalar field.
+local function MetadataLanded(readItem, written)
+    local readMeta = Bridge.Inventory.ItemMetadata(readItem)
+    if type(readMeta) ~= 'table' then return false end
+
+    for key, value in pairs(written) do
+        local t = type(value)
+        if t == 'string' or t == 'number' or t == 'boolean' then
+            return readMeta[key] == value
+        end
+    end
+
+    return next(readMeta) ~= nil
+end
+
+local function TgiannWriteMetadata(source, itemName, slot, metadata)
+    local shapes = tgiannWriteShape and { tgiannWriteShape } or { 'name', 'item' }
+
+    for _, shape in ipairs(shapes) do
+        local target = itemName
+        if shape == 'item' then
+            target = TgiannReadSlot(source, slot)
+        end
+
+        if target then
+            local ok, err = pcall(function()
+                return exports['tgiann-inventory']:UpdateItemMetadata(source, target, slot, metadata)
+            end)
+
+            if not ok then
+                print(('^1[Bridge Inventory] tgiann UpdateItemMetadata raised (item=%s slot=%s): %s^7')
+                    :format(tostring(itemName), tostring(slot), tostring(err)))
+            elseif tgiannWriteShape == shape then
+                return true -- proven shape, no read-back needed
+            elseif MetadataLanded(TgiannReadSlot(source, slot), metadata) then
+                tgiannWriteShape = shape
+                print(('^2[Bridge Inventory]^7 tgiann metadata writes use the "%s" call shape'):format(shape))
+                return true
+            end
+        end
+    end
+
+    print(('^1[Bridge Inventory] tgiann did NOT persist metadata for %s (slot %s). ' ..
+        'Phone data cannot be saved on this inventory — no call shape worked.^7')
+        :format(tostring(itemName), tostring(slot)))
+    return false
+end
+
+function Bridge.Inventory.ItemMetadata(item)
+    if type(item) ~= 'table' then return {} end
+
+    local meta = item.metadata
+    if type(meta) == 'table' and next(meta) ~= nil then
+        return meta
+    end
+
+    if INFO_BASED_SYSTEMS[Bridge.Inventory.System] then
+        local info = item.info
+        if type(info) == 'table' and next(info) ~= nil then
+            return info
+        end
+        if type(info) == 'table' then return info end
+    end
+
+    -- Empty/absent: hand back a real table so callers can write into it.
+    if type(meta) == 'table' then return meta end
+    return {}
+end
+
 -- ============================================================================
 -- AUTO-DETECTION
 -- ============================================================================
 
 local DetectionCandidates = {
     { resource = 'ox_inventory',    name = 'ox_inventory' },
+    { resource = 'one_inventory',   name = 'one_inventory' },
     { resource = 'jaksam_inventory', name = 'jaksam' },
+    { resource = 'tgiann-inventory', name = 'tgiann' },
     { resource = 'qb-inventory',    name = 'qb-inventory' },
-    { resource = 'qs-inventory',    name = 'qs-inventory' },
     { resource = 'codem-inventory', name = 'codem' },
     { resource = 'core_inventory',  name = 'core_inventory' },
 }
@@ -42,18 +164,35 @@ function Bridge.Inventory.DetectSystem()
 end
 
 CreateThread(function()
-    while not Bridge.Framework do Wait(50) end
+    -- Bounded: without a framework this waited forever and detection never ran,
+    -- which in turn blocked every inventory call downstream. Standalone setups
+    -- are legitimate, so time out and detect anyway.
+    Bridge.WaitFor(function() return Bridge.Framework end, 15000, 'framework detection')
+
     Bridge.Inventory.DetectSystem()
 end)
 
--- Helper: Ensure framework + inventory are ready
+-- Ensure framework + inventory are ready.
+--
+-- This used to be `while not Ready do Wait(50) end` — an UNBOUNDED wait. If
+-- detection never finished (framework missing, inventory resource not started,
+-- an error inside DetectSystem), every single inventory call hung forever and
+-- the phone simply never opened, with nothing in the console explaining it.
+-- Bridge.EnsureInventoryReady puts a deadline on it; after that we run degraded
+-- (System() is nil → the framework-native adapter) and say so, once.
+local readyTimeoutReported = false
+
 local function EnsureReady()
-    if Bridge.EnsureReady then
-        Bridge.EnsureReady()
-    elseif not Bridge.Ready then
-        while not Bridge.Framework do Wait(50) end
+    if Bridge.Inventory.Ready then return end
+
+    if Bridge.EnsureInventoryReady() then return end
+
+    if not readyTimeoutReported then
+        readyTimeoutReported = true
+        print('^1[Bridge Inventory] Detection did not finish in time. ' ..
+            'Is the inventory resource started, and does Config.InventorySystem match it? ' ..
+            'Falling back to framework-native item handling.^7')
     end
-    while not Bridge.Inventory.Ready do Wait(50) end
 end
 
 -- Helper: get the active inventory system (after detection)
@@ -77,6 +216,28 @@ local function GetQBLikePlayer(source)
     return nil
 end
 
+-- Capability report: which inventory systems can persist metadata writes back to
+-- the item. Owners running Config.UseMetadata=true on a system marked 'none'
+-- here will silently lose data, so server.lua warns loudly on resource start.
+-- Values:
+--   'full'    — full per-slot metadata read+write (recommended for UseMetadata)
+--   'partial' — read works, write may not persist all fields across server restart
+--   'none'    — UpdateItemMetadata is a no-op
+local InventoryMetadataSupport = {
+    ox_inventory   = 'full',
+    one_inventory  = 'full',
+    jaksam         = 'full',
+    tgiann         = 'full',
+    ['qb-inventory'] = 'full',
+    codem          = 'partial',
+    core_inventory = 'partial',
+}
+
+function Bridge.Inventory.SupportsMetadata()
+    if not Bridge.Inventory.System then return 'none' end
+    return InventoryMetadataSupport[Bridge.Inventory.System] or 'none'
+end
+
 -- ============================================================================
 -- CORE OPERATIONS
 -- ============================================================================
@@ -90,15 +251,29 @@ function Bridge.Inventory.AddItem(source, item, count, metadata)
     local sys = System()
 
     if sys == 'ox_inventory' then
-        local success = pcall(function()
-            exports.ox_inventory:AddItem(source, item, count, metadata)
+        -- ox AddItem returns success (false when the inventory can't carry it)
+        local success, added = pcall(function()
+            return exports.ox_inventory:AddItem(source, item, count, metadata)
         end)
-        return success
+        return success and added ~= false
+    elseif sys == 'one_inventory' then
+        -- one_inventory: AddItem(inv, item, count?, metadata?, slot?) -> boolean, string?
+        -- Pass nil instead of {} so the inventory applies its own default metadata
+        local success, added = pcall(function()
+            return exports.one_inventory:AddItem(source, item, count, next(metadata) ~= nil and metadata or nil)
+        end)
+        return success and added == true
     elseif sys == 'jaksam' then
         local success, ok = pcall(function()
             return exports['jaksam_inventory']:addItem(source, item, count, metadata)
         end)
         return success and ok or false
+    elseif sys == 'tgiann' then
+        -- tgiann: AddItem(source, item, amount, slot, metadata, isClotheSlot)
+        local success, ok = pcall(function()
+            return exports['tgiann-inventory']:AddItem(source, item, count, nil, metadata)
+        end)
+        return success and (ok ~= false)
     elseif sys == 'codem' then
         local success = pcall(function()
             exports['codem-inventory']:AddItem(source, item, count, nil, metadata)
@@ -140,15 +315,29 @@ function Bridge.Inventory.RemoveItem(source, item, count, metadata)
     local sys = System()
 
     if sys == 'ox_inventory' then
-        local success = pcall(function()
-            exports.ox_inventory:RemoveItem(source, item, count, metadata)
+        -- ox RemoveItem returns success (false when the player lacks the item)
+        local success, removed = pcall(function()
+            return exports.ox_inventory:RemoveItem(source, item, count, metadata)
         end)
-        return success
+        return success and removed ~= false
+    elseif sys == 'one_inventory' then
+        -- one_inventory: RemoveItem(inv, item, count?, metadata?, slot?);
+        -- metadata is a slot FILTER — pass nil instead of {} so any slot matches
+        local success, removed = pcall(function()
+            return exports.one_inventory:RemoveItem(source, item, count, next(metadata) ~= nil and metadata or nil)
+        end)
+        return success and removed == true
     elseif sys == 'jaksam' then
         local success, ok = pcall(function()
             return exports['jaksam_inventory']:removeItem(source, item, count, metadata)
         end)
         return success and ok or false
+    elseif sys == 'tgiann' then
+        -- tgiann: RemoveItem(source, item, amount, slot, metadata)
+        local success, ok = pcall(function()
+            return exports['tgiann-inventory']:RemoveItem(source, item, count, nil, metadata)
+        end)
+        return success and (ok ~= false)
     elseif sys == 'codem' then
         local success = pcall(function()
             exports['codem-inventory']:RemoveItem(source, item, count)
@@ -180,6 +369,76 @@ function Bridge.Inventory.RemoveItem(source, item, count, metadata)
     return false
 end
 
+-- Remove item from a specific slot (metadata-safe removal for unique items)
+function Bridge.Inventory.RemoveItemFromSlot(source, item, count, slot)
+    EnsureReady()
+    count = count or 1
+
+    if slot == nil then
+        return Bridge.Inventory.RemoveItem(source, item, count)
+    end
+
+    local sys = System()
+
+    if sys == 'ox_inventory' then
+        local success, removed = pcall(function()
+            return exports.ox_inventory:RemoveItem(source, item, count, nil, slot)
+        end)
+        return success and removed ~= false
+    elseif sys == 'one_inventory' then
+        -- one_inventory: RemoveItem(inv, item, count?, metadata?, slot?)
+        local success, removed = pcall(function()
+            return exports.one_inventory:RemoveItem(source, item, count, nil, slot)
+        end)
+        return success and removed == true
+    elseif sys == 'jaksam' then
+        -- jaksam slot ids may be prefixed ('SLOT-3'); its removeItem takes the numeric slot
+        local slotNum = tonumber((tostring(slot):gsub('SLOT%-', ''))) or slot
+        local success, ok = pcall(function()
+            return exports['jaksam_inventory']:removeItem(source, item, count, nil, slotNum)
+        end)
+        return success and ok or false
+    elseif sys == 'tgiann' then
+        -- tgiann: RemoveItem(source, item, amount, slot, metadata)
+        local success, ok = pcall(function()
+            return exports['tgiann-inventory']:RemoveItem(source, item, count, slot)
+        end)
+        return success and (ok ~= false)
+    elseif sys == 'codem' then
+        local success = pcall(function()
+            exports['codem-inventory']:RemoveItem(source, item, count, slot)
+        end)
+        return success
+    elseif sys == 'qb-inventory' then
+        local success, ok = pcall(function()
+            return exports['qb-inventory']:RemoveItem(source, item, count, slot, 'roadphone')
+        end)
+        return success and ok or false
+    elseif sys == 'core_inventory' then
+        -- core_inventory has no slot-targeted removal
+        return Bridge.Inventory.RemoveItem(source, item, count)
+    end
+
+    local fw = FrameworkNative()
+    if fw == 'esx' then
+        -- ESX native inventory is not slot-based
+        local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
+        if xPlayer then
+            xPlayer.removeInventoryItem(item, count)
+            return true
+        end
+    elseif fw == 'qbcore' or fw == 'qbox' then
+        local player = GetQBLikePlayer(source)
+        if player then
+            return player.Functions.RemoveItem(item, count, slot)
+        end
+    elseif fw == 'standalone' then
+        print('[Bridge] Standalone: RemoveItemFromSlot not implemented')
+        return false
+    end
+    return false
+end
+
 -- Get item count
 function Bridge.Inventory.GetItemCount(source, item)
     EnsureReady()
@@ -191,9 +450,19 @@ function Bridge.Inventory.GetItemCount(source, item)
             return exports.ox_inventory:GetItemCount(source, item)
         end)
         return success and count or 0
+    elseif sys == 'one_inventory' then
+        local success, count = pcall(function()
+            return exports.one_inventory:GetItemCount(source, item)
+        end)
+        return success and (count or 0) or 0
     elseif sys == 'jaksam' then
         local success, total = pcall(function()
             return exports['jaksam_inventory']:getTotalItemAmount(source, item)
+        end)
+        return success and (total or 0) or 0
+    elseif sys == 'tgiann' then
+        local success, total = pcall(function()
+            return exports['tgiann-inventory']:GetItemCount(source, item)
         end)
         return success and (total or 0) or 0
     elseif sys == 'codem' then
@@ -231,9 +500,19 @@ function Bridge.Inventory.HasItem(source, item, count)
     count = count or 1
 
     local sys = System()
-    if sys == 'jaksam' then
+    if sys == 'one_inventory' then
+        local success, ok = pcall(function()
+            return exports.one_inventory:HasItem(source, item, count)
+        end)
+        if success then return ok and true or false end
+    elseif sys == 'jaksam' then
         local success, ok = pcall(function()
             return exports['jaksam_inventory']:hasItem(source, item, count)
+        end)
+        if success then return ok and true or false end
+    elseif sys == 'tgiann' then
+        local success, ok = pcall(function()
+            return exports['tgiann-inventory']:HasItem(source, item, count)
         end)
         if success then return ok and true or false end
     elseif sys == 'codem' then
@@ -262,9 +541,20 @@ function Bridge.Inventory.GetItem(source, item)
             return exports.ox_inventory:GetItem(source, item)
         end)
         return success and itemData or nil
+    elseif sys == 'one_inventory' then
+        -- Returns a slot table { name, slot, count, metadata, ... }
+        local success, itemData = pcall(function()
+            return exports.one_inventory:GetItem(source, item)
+        end)
+        return success and itemData or nil
     elseif sys == 'jaksam' then
         local success, itemData = pcall(function()
             return exports['jaksam_inventory']:getItemByName(source, item)
+        end)
+        return success and itemData or nil
+    elseif sys == 'tgiann' then
+        local success, itemData = pcall(function()
+            return exports['tgiann-inventory']:GetItemByName(source, item)
         end)
         return success and itemData or nil
     elseif sys == 'codem' then
@@ -305,6 +595,17 @@ function Bridge.Inventory.GetInventory(source)
             return exports.ox_inventory:GetInventory(source)
         end)
         return success and inventory or {}
+    elseif sys == 'one_inventory' then
+        -- Array of populated slot tables (no holes to worry about)
+        local success, inventory = pcall(function()
+            return exports.one_inventory:GetInventoryItems(source)
+        end)
+        return success and inventory or {}
+    elseif sys == 'tgiann' then
+        local success, inventory = pcall(function()
+            return exports['tgiann-inventory']:GetPlayerItems(source)
+        end)
+        return success and inventory or {}
     end
 
     local fw = FrameworkNative()
@@ -322,47 +623,6 @@ function Bridge.Inventory.GetInventory(source)
     return {}
 end
 
--- Set item metadata (slot-based)
-function Bridge.Inventory.SetItemMetadata(source, item, slot, metadata)
-    EnsureReady()
-
-    local sys = System()
-
-    if sys == 'ox_inventory' then
-        local success = pcall(function()
-            exports.ox_inventory:SetMetadata(source, slot, metadata)
-        end)
-        return success
-    elseif sys == 'jaksam' then
-        local success, ok = pcall(function()
-            return exports['jaksam_inventory']:setItemMetadataInSlot(source, slot, metadata)
-        end)
-        return success and ok or false
-    elseif sys == 'codem' then
-        local success = pcall(function()
-            exports['codem-inventory']:SetItemMetadata(source, slot, metadata)
-        end)
-        return success
-    elseif sys == 'qb-inventory' then
-        local success, ok = pcall(function()
-            return exports['qb-inventory']:SetItemData(source, item, 'info', metadata, slot)
-        end)
-        return success and (ok ~= false)
-    end
-
-    local fw = FrameworkNative()
-    if fw == 'qbcore' or fw == 'qbox' then
-        local player = GetQBLikePlayer(source)
-        if player then
-            local invItem = player.Functions.GetItemBySlot(slot)
-            if invItem then
-                invItem.info = metadata
-                return true
-            end
-        end
-    end
-    return false
-end
 
 -- Can carry item (weight/slots check)
 function Bridge.Inventory.CanCarryItem(source, item, count)
@@ -376,9 +636,19 @@ function Bridge.Inventory.CanCarryItem(source, item, count)
             return exports.ox_inventory:CanCarryItem(source, item, count)
         end)
         return success and canCarry or false
+    elseif sys == 'one_inventory' then
+        local success, canCarry = pcall(function()
+            return exports.one_inventory:CanCarryItem(source, item, count)
+        end)
+        return success and canCarry == true
     elseif sys == 'jaksam' then
         local success, canCarry = pcall(function()
             return exports['jaksam_inventory']:canCarryItem(source, item, count)
+        end)
+        return success and canCarry or false
+    elseif sys == 'tgiann' then
+        local success, canCarry = pcall(function()
+            return exports['tgiann-inventory']:CanCarryItem(source, item, count)
         end)
         return success and canCarry or false
     elseif sys == 'qb-inventory' then
@@ -403,213 +673,244 @@ function Bridge.Inventory.CanCarryItem(source, item, count)
 end
 
 -- ============================================================================
--- METADATA FUNCTIONS (for inventory-system-specific metadata)
+-- METADATA LAYER
+-- ----------------------------------------------------------------------------
+-- Every inventory contributes exactly THREE primitives:
+--
+--   readSlot(source, slot)                       -> raw item table | nil
+--   listByName(source, itemName)                 -> array of raw items (.slot set)
+--   writeMetadata(source, itemName, slot, meta)  -> truthy on success
+--
+-- Everything else (metadata filters, per-slot reads, slot resolution) is derived
+-- from those in ONE place. Previously each of those operations was written out
+-- separately for all seven inventories, so the same bug had to be fixed eight
+-- times — and reading `item.metadata` instead of `ItemMetadata(item)` survived
+-- in the branches nobody touched. That shape is gone: adding an inventory is a
+-- table entry, not eight new `elseif` blocks.
+--
+-- Adapters may raise; the generic layer wraps every call in pcall.
 -- ============================================================================
 
--- Get item with metadata (inventory-system-specific)
-function Bridge.Inventory.GetItemWithMetadata(source, itemName, metadataFilter)
-    EnsureReady()
+local Adapters = {}
 
-    local inventorySystem = System()
+Adapters.ox_inventory = {
+    readSlot = function(src, slot)
+        return exports.ox_inventory:GetSlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports.ox_inventory:Search(src, 'slots', itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        exports.ox_inventory:SetMetadata(src, slot, meta)
+        return true
+    end,
+}
 
-    if inventorySystem == 'ox_inventory' then
-        local success, items = pcall(function()
-            return exports.ox_inventory:Search(source, 'slots', itemName)
-        end)
+Adapters.one_inventory = {
+    readSlot = function(src, slot)
+        return exports.one_inventory:GetSlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        local slotIds = exports.one_inventory:GetSlotIdsWithItem(src, itemName)
+        if type(slotIds) ~= 'table' then return nil end
 
-        if success and items then
-            if metadataFilter then
-                for _, item in pairs(items) do
-                    if item.metadata then
-                        local matches = true
-                        for key, value in pairs(metadataFilter) do
-                            if tostring(item.metadata[key]) ~= tostring(value) then
-                                matches = false
-                                break
-                            end
-                        end
-                        if matches then
-                            return item, item.slot
-                        end
-                    end
-                end
-            else
-                for _, item in pairs(items) do
-                    return item, item.slot
-                end
+        local items = {}
+        for _, slotId in ipairs(slotIds) do
+            local slotData = exports.one_inventory:GetSlot(src, slotId)
+            if slotData then
+                slotData.slot = slotData.slot or slotId
+                items[#items + 1] = slotData
             end
         end
-    elseif inventorySystem == 'jaksam' then
-        local success, items = pcall(function()
-            return exports['jaksam_inventory']:getItemsByName(source, itemName, metadataFilter)
-        end)
-        if success and items then
-            for _, item in ipairs(items) do
-                if item then
-                    return item, item.slot
-                end
+        return items
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        return exports.one_inventory:SetItemMetadata(src, slot, meta) == true
+    end,
+}
+
+Adapters.jaksam = {
+    readSlot = function(src, slot)
+        return exports['jaksam_inventory']:getItemFromSlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['jaksam_inventory']:getItemsByName(src, itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        return exports['jaksam_inventory']:setItemMetadataInSlot(src, slot, meta)
+    end,
+}
+
+Adapters.tgiann = {
+    readSlot = function(src, slot)
+        return exports['tgiann-inventory']:GetItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['tgiann-inventory']:GetItemsByName(src, itemName)
+    end,
+    -- Verified write: tgiann accepts the call and can persist nothing without
+    -- raising. TgiannWriteMetadata checks the result and remembers the call
+    -- shape that works. See the block near the top of this file.
+    writeMetadata = function(src, itemName, slot, meta)
+        return TgiannWriteMetadata(src, itemName, slot, meta)
+    end,
+}
+
+Adapters.codem = {
+    readSlot = function(src, slot)
+        return exports['codem-inventory']:GetItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['codem-inventory']:GetItemsByName(src, itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        exports['codem-inventory']:SetItemMetadata(src, slot, meta)
+        return true
+    end,
+}
+
+Adapters['qb-inventory'] = {
+    readSlot = function(src, slot)
+        return exports['qb-inventory']:GetItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['qb-inventory']:GetItemsByName(src, itemName)
+    end,
+    -- qb keeps per-slot data under `info` (docs.qbcore.org, verified)
+    writeMetadata = function(src, itemName, slot, meta)
+        exports['qb-inventory']:SetItemData(src, itemName, 'info', meta, slot)
+        return true
+    end,
+}
+
+Adapters.core_inventory = {
+    readSlot = function(src, slot)
+        return exports['core_inventory']:getItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['core_inventory']:getItems(src, itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        exports['core_inventory']:setMetadata(src, slot, meta)
+        return true
+    end,
+}
+
+-- Framework-native fallback: no standalone inventory, or a fork we do not
+-- recognise by resource name.
+local FrameworkAdapter = {
+    readSlot = function(src, slot)
+        local player = GetQBLikePlayer(src)
+        if not player then return nil end
+        return player.Functions.GetItemBySlot(slot)
+    end,
+    listByName = function(src, itemName)
+        local inventory = Bridge.Inventory.GetInventory(src)
+        if type(inventory) ~= 'table' then return nil end
+
+        local items = {}
+        for _, item in pairs(inventory) do
+            if item and item.name == itemName then
+                items[#items + 1] = item
             end
+        end
+        return items
+    end,
+    -- qb-like player object: mutate the in-memory item and persist it.
+    writeMetadata = function(src, itemName, slot, meta)
+        local fw = FrameworkNative()
+        if fw ~= 'qbcore' and fw ~= 'qbox' then return false end
+
+        local player = GetQBLikePlayer(src)
+        if not player then return false end
+
+        local invItem = player.Functions.GetItemBySlot(slot)
+        if not invItem then return false end
+
+        invItem.info = meta
+
+        -- Older qb-core exposes SetInventory on the player; fall back to
+        -- SetPlayerData when it does not.
+        local saved = pcall(function()
+            player.Functions.SetInventory(player.PlayerData.items)
+        end)
+        if not saved then
+            pcall(function()
+                player.Functions.SetPlayerData('items', player.PlayerData.items)
+            end)
         end
 
-    elseif inventorySystem == 'codem' then
-        local success, items = pcall(function()
-            return exports['codem-inventory']:GetItemsByName(source, itemName)
-        end)
-        if success and items and type(items) == 'table' then
-            if metadataFilter then
-                for _, item in pairs(items) do
-                    local meta = item.metadata or item.info
-                    if meta then
-                        local matches = true
-                        for key, value in pairs(metadataFilter) do
-                            if tostring(meta[key]) ~= tostring(value) then
-                                matches = false
-                                break
-                            end
-                        end
-                        if matches then
-                            return item, item.slot
-                        end
-                    end
-                end
-            else
-                for _, item in pairs(items) do
-                    return item, item.slot
-                end
-            end
-        end
-    elseif inventorySystem == 'qb-inventory' then
-        local success, items = pcall(function()
-            return exports['qb-inventory']:GetItemsByName(source, itemName)
-        end)
-        if success and items and type(items) == 'table' then
-            if metadataFilter then
-                for _, item in pairs(items) do
-                    local meta = item.info or item.metadata
-                    if meta then
-                        local matches = true
-                        for key, value in pairs(metadataFilter) do
-                            if tostring(meta[key]) ~= tostring(value) then
-                                matches = false
-                                break
-                            end
-                        end
-                        if matches then
-                            return item, item.slot
-                        end
-                    end
-                end
-            else
-                for _, item in pairs(items) do
-                    return item, item.slot
-                end
-            end
-        end
-    elseif inventorySystem == 'core_inventory' then
-        local success, items = pcall(function()
-            return exports['core_inventory']:getItems(source, itemName)
-        end)
-        if success and items and type(items) == 'table' then
-            if metadataFilter then
-                for _, item in pairs(items) do
-                    if item.metadata then
-                        local matches = true
-                        for key, value in pairs(metadataFilter) do
-                            if tostring(item.metadata[key]) ~= tostring(value) then
-                                matches = false
-                                break
-                            end
-                        end
-                        if matches then
-                            return item, item.slot
-                        end
-                    end
-                end
-            else
-                for _, item in pairs(items) do
-                    return item, item.slot
-                end
-            end
-        end
-    end
+        return true
+    end,
+}
 
-    return nil, nil
+local function Adapter()
+    return Adapters[System()] or FrameworkAdapter
 end
 
--- Get ALL items of a name with normalised metadata.
--- Used by phone_cache to find every phone item a player owns (multi-phone).
--- Returns: array of { slot, name, metadata } across all detected systems.
+-- A broken adapter would otherwise log on every single call (reads happen per
+-- message and per call). Report each distinct failure once — enough to notice,
+-- not enough to drown the console.
+local reportedFailures = {}
+
+--- Call an adapter primitive. Returns nil when the inventory is missing the
+--- primitive or the call raised — never throws at the caller.
+local function callAdapter(name, ...)
+    local fn = Adapter()[name]
+    if type(fn) ~= 'function' then return nil end
+
+    local ok, result = pcall(fn, ...)
+    if not ok then
+        local key = ('%s.%s:%s'):format(tostring(System()), name, tostring(result))
+        if not reportedFailures[key] then
+            reportedFailures[key] = true
+            print(('^1[Bridge Inventory] %s.%s failed: %s^7')
+                :format(tostring(System()), name, tostring(result)))
+        end
+        return nil
+    end
+    return result
+end
+
+--- Does this item's metadata match every key of the filter?
+--- String-compared on purpose: numbers arriving from the DB and strings coming
+--- from the NUI must match (phone numbers are stored both ways in the wild).
+local function matchesFilter(item, filter)
+    if not filter then return true end
+
+    local meta = Bridge.Inventory.ItemMetadata(item)
+    for key, value in pairs(filter) do
+        if tostring(meta[key]) ~= tostring(value) then
+            return false
+        end
+    end
+    return true
+end
+
+-- ============================================================================
+-- METADATA FUNCTIONS
+-- ============================================================================
+
+--- All items of a name the player carries, normalised to
+--- { slot, name, metadata } — metadata already resolved from metadata/info.
 function Bridge.Inventory.GetAllItemsByName(source, itemName)
     EnsureReady()
 
-    local sys = System()
+    local raw = callAdapter('listByName', source, itemName)
     local results = {}
+    if type(raw) ~= 'table' then return results end
 
-    local function push(slot, name, meta)
-        if slot == nil then return end
-        results[#results + 1] = {
-            slot = slot,
-            name = name or itemName,
-            metadata = meta or {},
-        }
-    end
-
-    if sys == 'ox_inventory' then
-        local ok, items = pcall(function()
-            return exports.ox_inventory:Search(source, 'slots', itemName)
-        end)
-        if ok and items then
-            for _, item in pairs(items) do
-                push(item.slot, item.name, item.metadata)
-            end
-        end
-    elseif sys == 'jaksam' then
-        local ok, items = pcall(function()
-            return exports['jaksam_inventory']:getItemsByName(source, itemName)
-        end)
-        if ok and items and type(items) == 'table' then
-            for slotKey, item in pairs(items) do
-                if item then
-                    -- jaksam keys by slot id; fall back to item.slot
-                    push(item.slot or slotKey, item.name, item.metadata)
-                end
-            end
-        end
-    elseif sys == 'codem' then
-        local ok, items = pcall(function()
-            return exports['codem-inventory']:GetItemsByName(source, itemName)
-        end)
-        if ok and items and type(items) == 'table' then
-            for _, item in pairs(items) do
-                push(item.slot, item.name, item.metadata or item.info)
-            end
-        end
-    elseif sys == 'qb-inventory' then
-        local ok, items = pcall(function()
-            return exports['qb-inventory']:GetItemsByName(source, itemName)
-        end)
-        if ok and items and type(items) == 'table' then
-            for _, item in pairs(items) do
-                push(item.slot, item.name, item.info or item.metadata)
-            end
-        end
-    elseif sys == 'core_inventory' then
-        local ok, items = pcall(function()
-            return exports['core_inventory']:getItems(source, itemName)
-        end)
-        if ok and items and type(items) == 'table' then
-            for _, item in pairs(items) do
-                push(item.slot, item.name, item.metadata)
-            end
-        end
-    else
-        -- Framework-native fallback (esx / qbcore / qs-inventory): scan inventory
-        local inventory = Bridge.Inventory.GetInventory(source)
-        if inventory and type(inventory) == 'table' then
-            for _, item in pairs(inventory) do
-                if item and (item.name == itemName) then
-                    push(item.slot, item.name, item.metadata or item.info)
-                end
+    -- Some inventories key the result by slot instead of returning an array,
+    -- so the key is the slot fallback when the entry carries none.
+    for key, item in pairs(raw) do
+        if type(item) == 'table' then
+            local slot = item.slot or (type(key) == 'number' and key or nil)
+            if slot ~= nil then
+                results[#results + 1] = {
+                    slot = slot,
+                    name = item.name or itemName,
+                    metadata = Bridge.Inventory.ItemMetadata(item),
+                }
             end
         end
     end
@@ -617,135 +918,66 @@ function Bridge.Inventory.GetAllItemsByName(source, itemName)
     return results
 end
 
--- Get item from specific slot (returns full item data or nil if not found)
-function Bridge.Inventory.GetItemFromSlot(source, slot)
+--- First item of this name, optionally filtered by metadata.
+--- Returns item, slot — the item carries a resolved `metadata` field.
+function Bridge.Inventory.GetItemWithMetadata(source, itemName, metadataFilter)
     EnsureReady()
 
-    local inventorySystem = System()
-
-    if inventorySystem == 'ox_inventory' then
-        local success, item = pcall(function()
-            return exports.ox_inventory:GetSlot(source, slot)
-        end)
-        if success and item then
-            return item
-        end
-    elseif inventorySystem == 'jaksam' then
-        local success, item = pcall(function()
-            return exports['jaksam_inventory']:getItemFromSlot(source, slot)
-        end)
-        if success and item then
-            return item
-        end
-    elseif inventorySystem == 'codem' then
-        local success, item = pcall(function()
-            return exports['codem-inventory']:GetItemBySlot(source, slot)
-        end)
-        if success and item then
-            return item
-        end
-    elseif inventorySystem == 'qb-inventory' then
-        local success, item = pcall(function()
-            return exports['qb-inventory']:GetItemBySlot(source, slot)
-        end)
-        if success and item then
-            return item
-        end
-    elseif inventorySystem == 'core_inventory' then
-        local success, item = pcall(function()
-            return exports['core_inventory']:getItemBySlot(source, slot)
-        end)
-        if success and item then
-            return item
+    for _, item in ipairs(Bridge.Inventory.GetAllItemsByName(source, itemName)) do
+        if matchesFilter(item, metadataFilter) then
+            return item, item.slot
         end
     end
 
     return nil
 end
 
--- Get metadata from an item
+--- Raw item at a slot, exactly as the inventory returns it (callers may need
+--- the untouched fields). Read its data with Bridge.Inventory.ItemMetadata.
+function Bridge.Inventory.GetItemFromSlot(source, slot)
+    EnsureReady()
+
+    if slot == nil then return nil end
+    return callAdapter('readSlot', source, slot)
+end
+
+--- Metadata of a specific item. With a slot it reads that slot (and verifies
+--- the item name), otherwise the first item of that name. Always a table.
 function Bridge.Inventory.GetItemMetadata(source, itemName, slot)
     EnsureReady()
 
-    local inventorySystem = System()
-
-    if inventorySystem == 'ox_inventory' then
-        if slot then
-            local success, item = pcall(function()
-                return exports.ox_inventory:GetSlot(source, slot)
-            end)
-            if success and item and item.name == itemName then
-                return item.metadata or {}
-            end
-            return {}
-        else
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            return item and item.metadata or {}
+    if slot ~= nil then
+        local item = Bridge.Inventory.GetItemFromSlot(source, slot)
+        if item and (item.name == itemName or itemName == nil) then
+            return Bridge.Inventory.ItemMetadata(item)
         end
-    elseif inventorySystem == 'jaksam' then
-        if slot then
-            local success, slotData = pcall(function()
-                return exports['jaksam_inventory']:getItemFromSlot(source, slot)
-            end)
-            if success and slotData then
-                if slotData.name == itemName then
-                    return slotData.metadata or {}
-                end
-            end
-            return {}
-        else
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            return item and item.metadata or {}
-        end
-    elseif inventorySystem == 'codem' then
-        if slot then
-            local success, item = pcall(function()
-                return exports['codem-inventory']:GetItemBySlot(source, slot)
-            end)
-            if success and item and item.name == itemName then
-                return item.metadata or item.info or {}
-            end
-            return {}
-        else
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            if item then
-                return item.metadata or item.info or {}
-            end
-            return {}
-        end
-    elseif inventorySystem == 'qb-inventory' then
-        if slot then
-            local success, item = pcall(function()
-                return exports['qb-inventory']:GetItemBySlot(source, slot)
-            end)
-            if success and item and item.name == itemName then
-                return item.info or item.metadata or {}
-            end
-            return {}
-        else
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            if item then
-                return item.info or item.metadata or {}
-            end
-            return {}
-        end
-    elseif inventorySystem == 'core_inventory' then
-        if slot then
-            local success, item = pcall(function()
-                return exports['core_inventory']:getItemBySlot(source, slot)
-            end)
-            if success and item and item.name == itemName then
-                return item.metadata or {}
-            end
-            return {}
-        else
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            return item and item.metadata or {}
-        end
+        return {}
     end
 
-    return {}
+    local item = Bridge.Inventory.GetItemWithMetadata(source, itemName)
+    return Bridge.Inventory.ItemMetadata(item)
 end
+
+--- Write metadata onto an item. Without a slot the first matching item is used.
+--- Returns whether the inventory accepted the write.
+function Bridge.Inventory.UpdateItemMetadata(source, itemName, slot, newMetadata)
+    EnsureReady()
+
+    if not slot then
+        local _, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
+        slot = foundSlot
+    end
+
+    if not slot then return false end
+
+    return callAdapter('writeMetadata', source, itemName, slot, newMetadata) and true or false
+end
+
+--- Kept for callers using the older name/argument order.
+function Bridge.Inventory.SetItemMetadata(source, item, slot, metadata)
+    return Bridge.Inventory.UpdateItemMetadata(source, item, slot, metadata)
+end
+
 
 -- Register a useable item across frameworks. The callback receives a normalised
 -- item table: { name, slot, metadata }. ESX cannot reliably surface slot/metadata
@@ -759,7 +991,7 @@ function Bridge.Inventory.RegisterUseableItem(itemName, callback)
         return {
             name = item.name or itemName,
             slot = item.slot,
-            metadata = item.metadata or item.info,
+            metadata = Bridge.Inventory.ItemMetadata(item),
         }
     end
 
@@ -780,71 +1012,3 @@ function Bridge.Inventory.RegisterUseableItem(itemName, callback)
     end
 end
 
--- Update metadata of an item
-function Bridge.Inventory.UpdateItemMetadata(source, itemName, slot, newMetadata)
-    EnsureReady()
-
-    local inventorySystem = System()
-
-    if inventorySystem == 'ox_inventory' then
-        if not slot then
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            slot = foundSlot
-        end
-
-        if slot then
-            local success = pcall(function()
-                exports.ox_inventory:SetMetadata(source, slot, newMetadata)
-            end)
-            return success
-        end
-    elseif inventorySystem == 'jaksam' then
-        if not slot then
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            slot = foundSlot
-        end
-
-        if slot then
-            local result = exports['jaksam_inventory']:setItemMetadataInSlot(source, slot, newMetadata)
-            return result
-        end
-    elseif inventorySystem == 'codem' then
-        if not slot then
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            slot = foundSlot
-        end
-
-        if slot then
-            local success = pcall(function()
-                exports['codem-inventory']:SetItemMetadata(source, slot, newMetadata)
-            end)
-            return success
-        end
-    elseif inventorySystem == 'qb-inventory' then
-        if not slot then
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            slot = foundSlot
-        end
-
-        if slot then
-            local success = pcall(function()
-                exports['qb-inventory']:SetItemData(source, itemName, 'info', newMetadata, slot)
-            end)
-            return success
-        end
-    elseif inventorySystem == 'core_inventory' then
-        if not slot then
-            local item, foundSlot = Bridge.Inventory.GetItemWithMetadata(source, itemName)
-            slot = foundSlot
-        end
-
-        if slot then
-            local success = pcall(function()
-                exports['core_inventory']:setMetadata(source, slot, newMetadata)
-            end)
-            return success
-        end
-    end
-
-    return false
-end

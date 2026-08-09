@@ -10,7 +10,9 @@ Bridge.Inventory.Ready = false
 
 local DetectionCandidates = {
     { resource = 'ox_inventory',     name = 'ox_inventory' },
+    { resource = 'one_inventory',    name = 'one_inventory' },
     { resource = 'jaksam_inventory', name = 'jaksam' },
+    { resource = 'tgiann-inventory', name = 'tgiann' },
     { resource = 'qb-inventory',     name = 'qb-inventory' },
     { resource = 'qs-inventory',     name = 'qs-inventory' },
     { resource = 'codem-inventory',  name = 'codem' },

@@ -117,23 +117,20 @@ function Bridge.UI.Progressbar(name, label, duration, useWhileDead, canCancel, d
     EnsureFrameworkReady()
     duration = duration or 5000
     useWhileDead = useWhileDead or false
-    canCancel = canCancel or true
+    if canCancel == nil then canCancel = true end
     disableControls = disableControls or {}
 
     if Bridge.Framework == 'esx' then
         -- ESX uses esx_progressbar
-        local finished = false
         exports['esx_progressbar']:Progressbar(label, duration, {
             FreezePlayer = true,
             onFinish = function()
-                finished = true
                 if onFinish then onFinish() end
             end,
             onCancel = function()
                 if onCancel then onCancel() end
             end
         })
-        return finished
     elseif Bridge.Framework == 'qbcore' then
         -- QBCore uses qb-progressbar
         exports['progressbar']:Progress({
@@ -274,15 +271,30 @@ function Bridge.UI.OpenContext(position, elements, onSelect, onClose)
         -- Convert elements to qb-menu format if needed
         local qbElements = {}
         for _, el in ipairs(elements) do
+            local nonClickable = el.unselectable or el.disabled
+            local params = el.params
+            if not params and el.event then
+                params = {
+                    event = el.event,
+                    args = el.args
+                }
+            end
+            if not params and onSelect and not nonClickable then
+                local element = el
+                params = {
+                    isAction = true,
+                    event = function()
+                        onSelect(nil, element)
+                    end
+                }
+            end
             table.insert(qbElements, {
                 header = el.title or el.header,
                 txt = el.description or el.txt or '',
                 icon = el.icon,
+                isMenuHeader = nonClickable or nil,
                 disabled = el.disabled,
-                params = el.params or {
-                    event = el.event,
-                    args = el.args
-                }
+                params = params
             })
         end
         exports['qb-menu']:openMenu(qbElements)
@@ -291,14 +303,18 @@ function Bridge.UI.OpenContext(position, elements, onSelect, onClose)
         pcall(function()
             local oxOptions = {}
             for _, el in ipairs(elements) do
+                local nonClickable = el.unselectable or el.disabled
                 table.insert(oxOptions, {
                     title = el.title or el.header,
                     description = el.description or el.txt,
                     icon = el.icon,
-                    disabled = el.disabled,
-                    onSelect = el.onSelect or (onSelect and function()
+                    disabled = nonClickable or nil,
+                    -- Skip onSelect entirely on unselectable rows so ox_lib doesn't
+                    -- invoke the parent callback with a header element (which lacks
+                    -- a `value` field and would crash downstream consumers).
+                    onSelect = (not nonClickable) and (el.onSelect or (onSelect and function()
                         onSelect(nil, el)
-                    end)
+                    end)) or nil,
                 })
             end
             lib.registerContext({

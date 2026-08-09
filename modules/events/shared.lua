@@ -9,14 +9,18 @@ Bridge.Events = {}
 -- when the framework uses different event names per side.
 local EventMappings = {
     -- Player Lifecycle Events
-    -- NOTE on Qbox: qbx_core does NOT introduce a `qbx_core:client:playerLoaded`
-    -- event — it only fires the QBCore-compat names. Server-side it triggers
-    -- `QBCore:Server:OnPlayerLoaded`, client-side `QBCore:Client:OnPlayerLoaded`.
-    -- Sources: qbx_core/client/character.lua, qbx_core/server/player.lua.
+    -- NOTE on QBCore/Qbox server side: `QBCore:Server:OnPlayerLoaded` is a
+    -- NETWORKED event (qbx_core clients TriggerServerEvent it) — listening via
+    -- AddEventHandler drops it with "not safe for net", and RegisterNetEvent
+    -- would let clients spoof it. Both qb-core and qbx_core also fire the
+    -- server-LOCAL `QBCore:Server:PlayerLoaded` (with the Player OBJECT as
+    -- first arg, not the id) from CreatePlayer, so we listen to that instead.
+    -- Sources: qb-core/server/player.lua, qbx_core/server/player.lua,
+    -- qbx_core/client/character.lua.
     PlayerLoaded = {
         esx = 'esx:playerLoaded',
-        qbcore = { server = 'QBCore:Server:OnPlayerLoaded', client = 'QBCore:Client:OnPlayerLoaded' },
-        qbox   = { server = 'QBCore:Server:OnPlayerLoaded', client = 'QBCore:Client:OnPlayerLoaded' },
+        qbcore = { server = 'QBCore:Server:PlayerLoaded', client = 'QBCore:Client:OnPlayerLoaded' },
+        qbox   = { server = 'QBCore:Server:PlayerLoaded', client = 'QBCore:Client:OnPlayerLoaded' },
         standalone = 'playerLoaded' -- Custom event for standalone
     },
 
@@ -30,7 +34,7 @@ local EventMappings = {
     PlayerSpawn = {
         esx = 'esx:onPlayerSpawn',
         qbcore = 'QBCore:Client:OnPlayerSpawn',
-        qbox = nil, -- qbx_core has no spawn event; consumers should use PlayerLoaded
+        qbox = 'playerSpawned', -- qbx_core fires no spawn event; spawnmanager's is FiveM-standard (matches the baseevents choice for PlayerDeath)
         standalone = 'playerSpawn'
     },
 
@@ -45,7 +49,7 @@ local EventMappings = {
     JobUpdate = {
         esx = 'esx:setJob',
         qbcore = 'QBCore:Client:OnJobUpdate',
-        qbox = 'qbx_core:client:onJobUpdate',
+        qbox = 'QBCore:Client:OnJobUpdate', -- qbx_core fires the QBCore-compat name only (server/player.lua)
         standalone = 'jobUpdate'
     },
 
@@ -61,7 +65,7 @@ local EventMappings = {
     GangUpdate = {
         esx = nil, -- ESX doesn't have gangs by default
         qbcore = 'QBCore:Client:OnGangUpdate',
-        qbox = 'qbx_core:client:onGangUpdate',
+        qbox = 'QBCore:Client:OnGangUpdate', -- qbx_core fires the QBCore-compat name only
         standalone = 'gangUpdate'
     },
 

@@ -14,65 +14,21 @@ local function EnsureFrameworkReady()
     end
 end
 
--- Event listeners for framework updates (registered after framework detection)
---[[CreateThread(function()
-    while not Bridge.Framework do
-        Wait(100)
-    end
-
-    if Bridge.Framework == 'esx' then
-        AddEventHandler('esx:playerLoaded', function(xPlayer)
-            Bridge.PlayerData = xPlayer
-        end)
-
-        AddEventHandler('esx:setJob', function(job)
-            Bridge.PlayerData.job = job
-        end)
-    elseif Bridge.Framework == 'qbcore' then
-        AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
-            Bridge.PlayerData = Bridge.FrameworkObject.Functions.GetPlayerData()
-        end)
-
-        AddEventHandler('QBCore:Player:SetPlayerData', function(playerData)
-            Bridge.PlayerData = playerData
-        end)
-
-        AddEventHandler('QBCore:Client:OnJobUpdate', function(job)
-            Bridge.PlayerData.job = job
-        end)
-    elseif Bridge.Framework == 'qbox' then
-        AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
-            Bridge.PlayerData = Bridge.FrameworkExport:GetPlayerData()
-        end)
-
-        AddEventHandler('QBCore:Player:SetPlayerData', function(playerData)
-            Bridge.PlayerData = playerData
-        end)
-
-        AddEventHandler('QBCore:Client:OnJobUpdate', function(job)
-            Bridge.PlayerData.job = job
-        end)
-    end
-end)--]]
-
 -- Get local player data
 function Bridge.GetPlayerData()
     EnsureFrameworkReady()
 
+    -- Always fetch fresh data from the framework. The framework keeps its own
+    -- player data current (e.g. on job changes), so caching it here would return
+    -- stale values — notably Bridge.GetJob() showing the old job after a change.
     if Bridge.Framework == 'esx' then
-        if not Bridge.PlayerData or not Bridge.PlayerData.identifier then
-            Bridge.PlayerData = Bridge.FrameworkObject.GetPlayerData()
-        end
+        Bridge.PlayerData = Bridge.FrameworkObject.GetPlayerData()
         return Bridge.PlayerData
     elseif Bridge.Framework == 'qbcore' then
-        if not Bridge.PlayerData or not Bridge.PlayerData.citizenid then
-            Bridge.PlayerData = Bridge.FrameworkObject.Functions.GetPlayerData()
-        end
+        Bridge.PlayerData = Bridge.FrameworkObject.Functions.GetPlayerData()
         return Bridge.PlayerData
     elseif Bridge.Framework == 'qbox' then
-        if not Bridge.PlayerData or not Bridge.PlayerData.citizenid then
-            Bridge.PlayerData = Bridge.FrameworkExport:GetPlayerData()
-        end
+        Bridge.PlayerData = Bridge.FrameworkExport:GetPlayerData()
         return Bridge.PlayerData
     elseif Bridge.Framework == 'standalone' then
         return {
