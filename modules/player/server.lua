@@ -98,6 +98,16 @@ function Bridge.Player.GetIdentifier(source)
     return nil
 end
 
+-- Helper: QBCore/Qbox character name. charinfo is missing while a player is
+-- still loading, so guard it instead of raising on the concatenation.
+local function GetCharinfoName(player)
+    local charinfo = player and player.PlayerData and player.PlayerData.charinfo
+    if not charinfo or not charinfo.firstname or not charinfo.lastname then
+        return nil
+    end
+    return charinfo.firstname .. ' ' .. charinfo.lastname
+end
+
 -- Get player name
 function Bridge.Player.GetName(source)
     EnsureFrameworkReady()
@@ -107,10 +117,10 @@ function Bridge.Player.GetName(source)
         return xPlayer and xPlayer.getName() or GetPlayerName(source)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
-        return player and player.PlayerData.charinfo.firstname .. ' ' .. player.PlayerData.charinfo.lastname or GetPlayerName(source)
+        return GetCharinfoName(player) or GetPlayerName(source)
     elseif Bridge.Framework == 'qbox' then
         local player = Bridge.FrameworkExport:GetPlayer(source)
-        return player and player.PlayerData.charinfo.firstname .. ' ' .. player.PlayerData.charinfo.lastname or GetPlayerName(source)
+        return GetCharinfoName(player) or GetPlayerName(source)
     elseif Bridge.Framework == 'standalone' then
         return GetPlayerName(source)
     end
@@ -170,8 +180,7 @@ function Bridge.Player.AddMoney(source, moneyType, amount)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
         if player then
-            player.Functions.AddMoney(moneyType, amount)
-            return true
+            return player.Functions.AddMoney(moneyType, amount) ~= false
         end
     elseif Bridge.Framework == 'qbox' then
         local identifier = Bridge.Player.GetIdentifier(source)
@@ -201,8 +210,7 @@ function Bridge.Player.RemoveMoney(source, moneyType, amount)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
         if player then
-            player.Functions.RemoveMoney(moneyType, amount)
-            return true
+            return player.Functions.RemoveMoney(moneyType, amount) == true
         end
     elseif Bridge.Framework == 'qbox' then
         local identifier = Bridge.Player.GetIdentifier(source)
@@ -244,4 +252,114 @@ function Bridge.Player.GetMoney(source, moneyType)
         return 0
     end
     return 0
+end
+
+-- Normalizes the sex/gender value of every framework to 'm' / 'f' / nil.
+local function NormalizeSex(value)
+    if value == nil then return nil end
+    if type(value) == 'number' then
+        return value == 1 and 'f' or 'm'
+    end
+    local v = tostring(value):lower()
+    if v == 'm' or v == 'male' or v == '0' then return 'm' end
+    if v == 'f' or v == 'female' or v == '1' then return 'f' end
+    return nil
+end
+
+-- Character identity as printed on an ID card. Missing values stay nil.
+function Bridge.Player.GetIdentity(source)
+    EnsureFrameworkReady()
+
+    if Bridge.Framework == 'esx' then
+        local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
+        if not xPlayer then return nil end
+        -- xPlayer methods are function references into es_extended: a nil result
+        -- arrives as no value at all, which tonumber() rejects. A local turns it into nil.
+        local height = xPlayer.get('height')
+        local identity = {
+            firstname = xPlayer.get('firstname'),
+            lastname = xPlayer.get('lastname'),
+            dateofbirth = xPlayer.get('dateofbirth'),
+            sex = NormalizeSex(xPlayer.get('sex')),
+            height = tonumber(height),
+            nationality = nil
+        }
+        if not identity.firstname or not identity.lastname then
+            local rows = MySQL.Sync.fetchAll(
+                'SELECT firstname, lastname, dateofbirth, sex, height FROM ' .. Bridge.UserTable ..
+                ' WHERE ' .. Bridge.IdentifierColumn .. ' = @identifier',
+                { ['@identifier'] = xPlayer.identifier })
+            local row = rows and rows[1]
+            if row then
+                identity.firstname = row.firstname
+                identity.lastname = row.lastname
+                identity.dateofbirth = row.dateofbirth
+                identity.sex = NormalizeSex(row.sex)
+                identity.height = tonumber(row.height)
+            end
+        end
+        return identity
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local player = Bridge.Player.GetPlayerBySource(source)
+        local charinfo = player and player.PlayerData and player.PlayerData.charinfo
+        if not charinfo then return nil end
+        return {
+            firstname = charinfo.firstname,
+            lastname = charinfo.lastname,
+            dateofbirth = charinfo.birthdate,
+            sex = NormalizeSex(charinfo.gender),
+            height = nil,
+            nationality = charinfo.nationality
+        }
+    end
+
+    local name = GetPlayerName(source)
+    return { firstname = name, lastname = nil, dateofbirth = nil, sex = nil, height = nil, nationality = nil }
+end
+
+-- Set of license keys the character holds, e.g. { drive = true, weapon = true }.
+function Bridge.Player.GetLicenses(source)
+    EnsureFrameworkReady()
+    local result = {}
+
+    if Bridge.Framework == 'esx' then
+        local identifier = Bridge.Player.GetIdentifier(source)
+        if not identifier then return result end
+        local rows = MySQL.Sync.fetchAll('SELECT type FROM user_licenses WHERE owner = @owner',
+            { ['@owner'] = identifier })
+        for _, row in ipairs(rows or {}) do
+            if row.type then result[row.type] = true end
+        end
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local player = Bridge.Player.GetPlayerBySource(source)
+        local licences = player and player.PlayerData and player.PlayerData.metadata
+            and player.PlayerData.metadata.licences
+        if type(licences) == 'table' then
+            for key, value in pairs(licences) do
+                if value == true or value == 1 then result[key] = true end
+            end
+        end
+    end
+
+    return result
+end
+
+-- Gang membership. Only QBCore/Qbox have a standard source; ESX returns nil.
+function Bridge.Player.GetGang(source)
+    EnsureFrameworkReady()
+
+    if Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local player = Bridge.Player.GetPlayerBySource(source)
+        local gang = player and player.PlayerData and player.PlayerData.gang
+        if not gang or not gang.name or gang.name == 'none' then return nil end
+        local grade = gang.grade
+        return {
+            name = gang.name,
+            label = gang.label or gang.name,
+            grade = type(grade) == 'table' and grade.level or grade,
+            gradeLabel = type(grade) == 'table' and grade.name or nil
+        }
+    end
+
+    return nil
 end

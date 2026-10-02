@@ -19,7 +19,7 @@ function Bridge.TriggerCallback(name, callback, ...)
     EnsureFrameworkReady()
 
     if Bridge.Framework == 'esx' then
-        ESX.TriggerServerCallback(name, callback, ...)
+         ESX.TriggerServerCallback(name, callback, ...)
     elseif Bridge.Framework == 'qbcore' then
         QBCore.Functions.TriggerCallback(name, callback, ...)
     elseif Bridge.Framework == 'qbox' then

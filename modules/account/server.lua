@@ -64,8 +64,7 @@ function Bridge.Account.AddMoney(source, accountType, amount, reason)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
         if player then
-            player.Functions.AddMoney(accountType, amount, reason)
-            return true
+            return player.Functions.AddMoney(accountType, amount, reason) == true
         end
     elseif Bridge.Framework == 'qbox' then
         -- qbx_core money exports accept Source|string directly
@@ -92,8 +91,7 @@ function Bridge.Account.RemoveMoney(source, accountType, amount, reason)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
         if player then
-            player.Functions.RemoveMoney(accountType, amount, reason)
-            return true
+            return player.Functions.RemoveMoney(accountType, amount, reason) == true
         end
     elseif Bridge.Framework == 'qbox' then
         -- qbx_core money exports accept Source|string directly
@@ -119,8 +117,7 @@ function Bridge.Account.SetMoney(source, accountType, amount)
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayer(source)
         if player then
-            player.Functions.SetMoney(accountType, amount)
-            return true
+            return player.Functions.SetMoney(accountType, amount) == true
         end
     elseif Bridge.Framework == 'qbox' then
         -- qbx_core money exports accept Source|string directly
@@ -388,9 +385,12 @@ function Bridge.Account.AddSocietyMoney(accountName, amount, reason)
 
     if Bridge.Framework == 'esx' then
         local success = false
+        local settled = false
         local p = promise.new()
 
         TriggerEvent('esx_addonaccount:getSharedAccount', normalizedName, function(account)
+            if settled then return end
+            settled = true
             if account then
                 account.addMoney(amount)
                 success = true
@@ -400,6 +400,8 @@ function Bridge.Account.AddSocietyMoney(accountName, amount, reason)
 
         -- Guard: resolve false if esx_addonaccount never answers (resource absent)
         SetTimeout(2000, function()
+            if settled then return end
+            settled = true
             p:resolve(false)
         end)
 
@@ -479,9 +481,12 @@ function Bridge.Account.RemoveSocietyMoney(accountName, amount, reason)
 
     if Bridge.Framework == 'esx' then
         local success = false
+        local settled = false
         local p = promise.new()
 
         TriggerEvent('esx_addonaccount:getSharedAccount', normalizedName, function(account)
+            if settled then return end
+            settled = true
             if account and account.money >= amount then
                 account.removeMoney(amount)
                 success = true
@@ -491,6 +496,8 @@ function Bridge.Account.RemoveSocietyMoney(accountName, amount, reason)
 
         -- Guard: resolve false if esx_addonaccount never answers (resource absent)
         SetTimeout(2000, function()
+            if settled then return end
+            settled = true
             p:resolve(false)
         end)
 

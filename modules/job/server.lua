@@ -278,6 +278,43 @@ function Bridge.Job.GetPlayersByJob(jobName, minGrade)
     return players
 end
 
+-- Count online players per job: { [jobName] = count }.
+-- Every player object fetched from the framework is copied across the resource
+-- boundary, so this reads ESX's own counter where it exists and otherwise makes
+-- a single pass without per-player lookups.
+function Bridge.Job.CountPlayersByJobs(jobNames)
+    EnsureFrameworkReady()
+    local counts = {}
+    for _, jobName in ipairs(jobNames) do counts[jobName] = 0 end
+    if #jobNames == 0 then return counts end
+
+    if Bridge.Framework == 'esx' then
+        local getNumPlayers = Bridge.FrameworkObject.GetNumPlayers
+        local ok, result = false, nil
+        if getNumPlayers then ok, result = pcall(getNumPlayers, 'job', jobNames) end
+        if ok and type(result) == 'table' then
+            for _, jobName in ipairs(jobNames) do counts[jobName] = tonumber(result[jobName]) or 0 end
+            return counts
+        end
+        for _, jobName in ipairs(jobNames) do
+            for _ in pairs(Bridge.FrameworkObject.GetExtendedPlayers('job', jobName)) do
+                counts[jobName] = counts[jobName] + 1
+            end
+        end
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local qbPlayers = Bridge.Framework == 'qbcore'
+            and Bridge.FrameworkObject.Functions.GetQBPlayers()
+            or Bridge.FrameworkExport:GetQBPlayers()
+        for _, player in pairs(qbPlayers) do
+            local job = player and player.PlayerData and player.PlayerData.job
+            local jobName = job and job.name
+            if jobName and counts[jobName] then counts[jobName] = counts[jobName] + 1 end
+        end
+    end
+
+    return counts
+end
+
 -- Get count of players on duty for job
 function Bridge.Job.GetOnDutyCount(jobName)
     EnsureFrameworkReady()

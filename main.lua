@@ -35,7 +35,6 @@ local function DetectFramework()
         Bridge.IdentifierColumn = 'citizenid'
         Bridge.VehiclesTable = 'player_vehicles'
         Bridge.VehiclesOwnerColumn = 'citizenid'
-        print('^2[Bridge]^7 Qbox Framework detected')
         return true
     end
 
@@ -52,7 +51,6 @@ local function DetectFramework()
             Bridge.IdentifierColumn = 'identifier'
             Bridge.VehiclesTable = 'owned_vehicles'
             Bridge.VehiclesOwnerColumn = 'owner'
-            print('^2[Bridge]^7 ESX Framework detected')
             return true
         end
     end
@@ -69,7 +67,6 @@ local function DetectFramework()
             Bridge.IdentifierColumn = 'citizenid'
             Bridge.VehiclesTable = 'player_vehicles'
             Bridge.VehiclesOwnerColumn = 'citizenid'
-            print('^2[Bridge]^7 QBCore Framework detected')
             return true
         end
     end
@@ -79,12 +76,17 @@ local function DetectFramework()
     return false
 end
 
--- True while a known framework resource is still starting up - in that case
--- detection should retry instead of locking into the wrong mode.
-local function IsFrameworkStarting()
-    return GetResourceState('es_extended') == 'starting'
-        or GetResourceState('qbx_core') == 'starting'
-        or GetResourceState('qb-core') == 'starting'
+-- True while a known framework resource is present - either still starting up,
+-- or already started but not yet usable. A resource reports 'started' before it
+-- has exported its core object (es_extended and getSharedObject), so detection
+-- has to keep retrying in that window too instead of locking into the wrong
+-- mode on the very first attempt.
+local function IsFrameworkPresent()
+    local function present(resource)
+        local state = GetResourceState(resource)
+        return state == 'starting' or state == 'started'
+    end
+    return present('es_extended') or present('qbx_core') or present('qb-core')
 end
 
 -- Standalone fallback (no framework)
@@ -94,14 +96,22 @@ local function SetStandalone()
     Bridge.IdentifierColumn = 'identifier'
     Bridge.VehiclesTable = 'owned_vehicles'
     Bridge.VehiclesOwnerColumn = 'owner'
-    print('^3[Bridge]^7 No framework detected - Standalone mode')
-    print('^1[Bridge WARNING]^7 You are running in standalone mode!')
-    print('^1[Bridge WARNING]^7 Please configure your database tables in bridge/main.lua:')
-    print('^1[Bridge WARNING]^7   - Bridge.UserTable (default: "users")')
-    print('^1[Bridge WARNING]^7   - Bridge.IdentifierColumn (default: "identifier")')
-    print('^1[Bridge WARNING]^7   - Bridge.VehiclesTable (default: "owned_vehicles")')
-    print('^1[Bridge WARNING]^7   - Bridge.VehiclesOwnerColumn (default: "owner")')
-    print('^1[Bridge WARNING]^7 Remove this warning once you have configured your tables.')
+end
+
+local FRAMEWORK_LABELS = { esx = 'ESX', qbcore = 'QBCore', qbox = 'Qbox' }
+
+-- The bridge's only startup line (server console): framework plus the detected inventory.
+local function PrintSummary()
+    if not IsDuplicityVersion() then return end
+    if Bridge.Framework == 'standalone' then
+        return print('^3[Bridge]^7 No framework found, running standalone - check the table names in SetStandalone (bridge/main.lua)')
+    end
+    local line = FRAMEWORK_LABELS[Bridge.Framework]
+    if Bridge.Inventory and Bridge.WaitFor(function() return Bridge.Inventory.Ready end, 15000) then
+        local system = Bridge.Inventory.System
+        line = line .. ' + ' .. (system == Bridge.Framework and 'native inventory' or tostring(system))
+    end
+    print('^2[Bridge]^7 ' .. line)
 end
 
 -- Initialization
@@ -110,7 +120,7 @@ CreateThread(function()
     local maxAttempts = 20
     while not DetectFramework() do
         attempts = attempts + 1
-        if attempts >= maxAttempts or not IsFrameworkStarting() then
+        if attempts >= maxAttempts or not IsFrameworkPresent() then
             SetStandalone()
             break
         end
@@ -131,7 +141,7 @@ CreateThread(function()
     -- Clear the callback queue
     readyCallbacks = {}
 
-    print('^2[Bridge]^7 Successfully initialized!')
+    PrintSummary()
 end)
 
 -- Utility function to check framework

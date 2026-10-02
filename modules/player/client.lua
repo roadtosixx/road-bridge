@@ -130,7 +130,8 @@ function Bridge.IsDead()
     EnsureFrameworkReady()
 
     if Bridge.Framework == 'esx' then
-        return Bridge.PlayerData.dead or false
+        local playerData = Bridge.GetPlayerData()
+        return playerData.dead or false
     elseif Bridge.Framework == 'qbcore' then
         local player = Bridge.FrameworkObject.Functions.GetPlayerData()
         return player.metadata and player.metadata.isdead or false

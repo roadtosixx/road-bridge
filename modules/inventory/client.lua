@@ -14,7 +14,6 @@ local DetectionCandidates = {
     { resource = 'jaksam_inventory', name = 'jaksam' },
     { resource = 'tgiann-inventory', name = 'tgiann' },
     { resource = 'qb-inventory',     name = 'qb-inventory' },
-    { resource = 'qs-inventory',     name = 'qs-inventory' },
     { resource = 'codem-inventory',  name = 'codem' },
     { resource = 'core_inventory',   name = 'core_inventory' },
 }

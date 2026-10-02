@@ -36,6 +36,11 @@ function Bridge.WaitFor(check, timeout, label)
         end, label or 'Bridge.WaitFor timed out', timeout)
 
         if ok then return true, value end
+
+        -- ox_lib checks its deadline before polling again after a yield.
+        -- A startup pause can exceed it even though initialization has completed.
+        result = check()
+        if result then return true, result end
     else
         local deadline = timeout and (GetGameTimer() + timeout) or nil
         while true do
@@ -58,8 +63,7 @@ function Bridge.EnsureReady()
     if Bridge.Ready then return true end
 
     if Bridge.WaitForReady then
-        Bridge.WaitForReady()
-        return true
+        return Bridge.WaitForReady() == true
     end
 
     return (Bridge.WaitFor(function() return Bridge.Framework end, 15000, 'framework detection'))

@@ -93,7 +93,6 @@ local function TgiannWriteMetadata(source, itemName, slot, metadata)
                 return true -- proven shape, no read-back needed
             elseif MetadataLanded(TgiannReadSlot(source, slot), metadata) then
                 tgiannWriteShape = shape
-                print(('^2[Bridge Inventory]^7 tgiann metadata writes use the "%s" call shape'):format(shape))
                 return true
             end
         end
@@ -130,6 +129,10 @@ end
 -- AUTO-DETECTION
 -- ============================================================================
 
+-- Kept in sync with the client list in inventory/client.lua - if the two
+-- disagree, client and server report a different Bridge.Inventory.System for
+-- the same server. Only list an inventory that has an adapter below; anything
+-- else falls through to the framework-native fallback on both sides.
 local DetectionCandidates = {
     { resource = 'ox_inventory',    name = 'ox_inventory' },
     { resource = 'one_inventory',   name = 'one_inventory' },
@@ -144,7 +147,6 @@ function Bridge.Inventory.DetectSystem()
     local override = Config and Config.InventorySystem
     if override and override ~= '' and override ~= 'auto' then
         Bridge.Inventory.System = override
-        print('^3[Bridge Inventory]^7 Using configured system: ' .. tostring(override) .. ' (auto-detection skipped)')
         Bridge.Inventory.Ready = true
         return
     end
@@ -152,14 +154,12 @@ function Bridge.Inventory.DetectSystem()
     for _, c in ipairs(DetectionCandidates) do
         if GetResourceState(c.resource) == 'started' then
             Bridge.Inventory.System = c.name
-            print('^2[Bridge Inventory]^7 ' .. c.name .. ' detected')
             Bridge.Inventory.Ready = true
             return
         end
     end
 
     Bridge.Inventory.System = Bridge.Framework or 'standalone'
-    print('^3[Bridge Inventory]^7 No standalone inventory detected, falling back to framework-native (' .. Bridge.Inventory.System .. ')')
     Bridge.Inventory.Ready = true
 end
 
@@ -310,7 +310,7 @@ end
 function Bridge.Inventory.RemoveItem(source, item, count, metadata)
     EnsureReady()
     count = count or 1
-    metadata = metadata or {}
+    -- Keep an omitted filter nil so items with metadata can also be removed.
 
     local sys = System()
 
@@ -324,7 +324,7 @@ function Bridge.Inventory.RemoveItem(source, item, count, metadata)
         -- one_inventory: RemoveItem(inv, item, count?, metadata?, slot?);
         -- metadata is a slot FILTER — pass nil instead of {} so any slot matches
         local success, removed = pcall(function()
-            return exports.one_inventory:RemoveItem(source, item, count, next(metadata) ~= nil and metadata or nil)
+            return exports.one_inventory:RemoveItem(source, item, count, metadata and next(metadata) ~= nil and metadata or nil)
         end)
         return success and removed == true
     elseif sys == 'jaksam' then
@@ -745,8 +745,20 @@ Adapters.tgiann = {
     readSlot = function(src, slot)
         return exports['tgiann-inventory']:GetItemBySlot(src, slot)
     end,
+    -- GetItemsByName is documented but not exported server-side by older
+    -- releases (1.58.1 raises "No such export"); GetPlayerItems exists in all.
     listByName = function(src, itemName)
-        return exports['tgiann-inventory']:GetItemsByName(src, itemName)
+        local inventory = exports['tgiann-inventory']:GetPlayerItems(src)
+        if type(inventory) ~= 'table' then return nil end
+
+        local items = {}
+        for key, item in pairs(inventory) do
+            if type(item) == 'table' and item.name == itemName then
+                item.slot = item.slot or tonumber(key)
+                items[#items + 1] = item
+            end
+        end
+        return items
     end,
     -- Verified write: tgiann accepts the call and can persist nothing without
     -- raising. TgiannWriteMetadata checks the result and remembers the call
