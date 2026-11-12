@@ -79,11 +79,27 @@ function Bridge.Player.GetPlayerByIdentifier(identifier)
     return nil
 end
 
+-- GetPlayerFromId copies the whole xPlayer across the resource boundary: every
+-- method becomes a function reference, and inventory, accounts and loadout are
+-- serialized too. The session stores ask for the identifier several times per
+-- phone open, so es_extended 1.11+'s RunStaticPlayerMethod is used instead; it
+-- returns the string alone. Older es_extended has no such export.
+local esxStaticMethods = true
+
+local function esxStaticIdentifier(source)
+    return Bridge.FrameworkExport:RunStaticPlayerMethod(tonumber(source), 'getIdentifier')
+end
+
 -- Get player identifier
 function Bridge.Player.GetIdentifier(source)
     EnsureFrameworkReady()
 
     if Bridge.Framework == 'esx' then
+        if esxStaticMethods then
+            local ok, identifier = pcall(esxStaticIdentifier, source)
+            if ok then return identifier end
+            esxStaticMethods = false
+        end
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
         return xPlayer and xPlayer.identifier or nil
     elseif Bridge.Framework == 'qbcore' then
@@ -285,7 +301,7 @@ function Bridge.Player.GetIdentity(source)
             nationality = nil
         }
         if not identity.firstname or not identity.lastname then
-            local rows = MySQL.Sync.fetchAll(
+            local rows = Bridge.DB.Sync.fetchAll(
                 'SELECT firstname, lastname, dateofbirth, sex, height FROM ' .. Bridge.UserTable ..
                 ' WHERE ' .. Bridge.IdentifierColumn .. ' = @identifier',
                 { ['@identifier'] = xPlayer.identifier })
@@ -325,7 +341,7 @@ function Bridge.Player.GetLicenses(source)
     if Bridge.Framework == 'esx' then
         local identifier = Bridge.Player.GetIdentifier(source)
         if not identifier then return result end
-        local rows = MySQL.Sync.fetchAll('SELECT type FROM user_licenses WHERE owner = @owner',
+        local rows = Bridge.DB.Sync.fetchAll('SELECT type FROM user_licenses WHERE owner = @owner',
             { ['@owner'] = identifier })
         for _, row in ipairs(rows or {}) do
             if row.type then result[row.type] = true end
@@ -362,4 +378,224 @@ function Bridge.Player.GetGang(source)
     end
 
     return nil
+end
+
+-- ============================================
+-- Citizen records (online or offline)
+-- ============================================
+
+-- LIKE patterns: backslash is MySQL's default escape character.
+local function EscapeLike(text)
+    return (text:gsub('[\\%%_]', '\\%0'))
+end
+
+local function DecodeJson(text)
+    if type(text) == 'table' then return text end
+    if type(text) ~= 'string' or text == '' then return nil end
+    local ok, value = pcall(json.decode, text)
+    return ok and type(value) == 'table' and value or nil
+end
+
+local function Trimmed(text)
+    return type(text) == 'string' and text:match('^%s*(.-)%s*$') or ''
+end
+
+local function TextOrNil(value)
+    if value == nil then return nil end
+    local text = tostring(value)
+    return text ~= '' and text or nil
+end
+
+local function CitizenFromCharinfo(identifier, charinfo)
+    charinfo = DecodeJson(charinfo) or {}
+    return {
+        identifier = identifier,
+        firstname = TextOrNil(charinfo.firstname),
+        lastname = TextOrNil(charinfo.lastname),
+        dateofbirth = TextOrNil(charinfo.birthdate),
+        sex = NormalizeSex(charinfo.gender),
+    }
+end
+
+--- Citizens whose name (either order) contains `query`, or whose identifier is `query`.
+--- @return table[] { identifier, firstname, lastname, dateofbirth, sex }
+function Bridge.Player.SearchCitizens(query, limit)
+    EnsureFrameworkReady()
+    local text = Trimmed(query)
+    if #text < 2 then return {} end
+    local count = math.max(1, math.min(math.floor(tonumber(limit) or 50), 200))
+    local params = { ['@q'] = '%' .. EscapeLike(text) .. '%', ['@exact'] = text }
+    local result = {}
+
+    if Bridge.Framework == 'esx' then
+        local rows = Bridge.DB.Sync.fetchAll(
+            ("SELECT identifier, firstname, lastname, dateofbirth, sex FROM %s WHERE CONCAT_WS(' ', firstname, lastname) LIKE @q OR CONCAT_WS(' ', lastname, firstname) LIKE @q OR %s = @exact LIMIT %d")
+                :format(Bridge.UserTable, Bridge.IdentifierColumn, count),
+            params
+        ) or {}
+        for _, row in ipairs(rows) do
+            result[#result + 1] = {
+                identifier = row.identifier,
+                firstname = TextOrNil(row.firstname),
+                lastname = TextOrNil(row.lastname),
+                dateofbirth = TextOrNil(row.dateofbirth),
+                sex = NormalizeSex(row.sex),
+            }
+        end
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local first = "JSON_UNQUOTE(JSON_EXTRACT(charinfo, '$.firstname'))"
+        local last = "JSON_UNQUOTE(JSON_EXTRACT(charinfo, '$.lastname'))"
+        local rows = Bridge.DB.Sync.fetchAll(
+            ("SELECT citizenid, charinfo FROM players WHERE CONCAT_WS(' ', %s, %s) LIKE @q OR CONCAT_WS(' ', %s, %s) LIKE @q OR citizenid = @exact LIMIT %d")
+                :format(first, last, last, first, count),
+            params
+        ) or {}
+        for _, row in ipairs(rows) do
+            result[#result + 1] = CitizenFromCharinfo(row.citizenid, row.charinfo)
+        end
+    elseif Bridge.Framework == 'standalone' then
+        local needle = text:lower()
+        for _, playerId in ipairs(GetPlayers()) do
+            local name = GetPlayerName(playerId) or ''
+            local identifier = GetPlayerIdentifier(playerId, 0)
+            if #result < count and (name:lower():find(needle, 1, true) or identifier == text) then
+                result[#result + 1] = { identifier = identifier, firstname = name }
+            end
+        end
+    end
+
+    return result
+end
+
+--- One citizen by identifier, online or offline, with phone and height when the framework keeps them.
+--- @return table? { identifier, firstname, lastname, dateofbirth, sex, height?, phone? }
+function Bridge.Player.GetCitizen(identifier)
+    EnsureFrameworkReady()
+    if type(identifier) ~= 'string' or identifier == '' then return nil end
+
+    local player = Bridge.Player.GetPlayerByIdentifier(identifier)
+    local source = player and tonumber(player.source)
+    if source then
+        local identity = Bridge.Player.GetIdentity(source)
+        if identity then
+            local charinfo = player.PlayerData and player.PlayerData.charinfo
+            return {
+                identifier = identifier,
+                firstname = identity.firstname,
+                lastname = identity.lastname,
+                dateofbirth = identity.dateofbirth,
+                sex = identity.sex,
+                height = identity.height,
+                phone = charinfo and TextOrNil(charinfo.phone) or nil,
+            }
+        end
+    end
+
+    if Bridge.Framework == 'esx' then
+        local row = (Bridge.DB.Sync.fetchAll(
+            'SELECT identifier, firstname, lastname, dateofbirth, sex, height FROM ' .. Bridge.UserTable ..
+            ' WHERE ' .. Bridge.IdentifierColumn .. ' = @identifier',
+            { ['@identifier'] = identifier }
+        ) or {})[1]
+        if not row then return nil end
+        return {
+            identifier = identifier,
+            firstname = TextOrNil(row.firstname),
+            lastname = TextOrNil(row.lastname),
+            dateofbirth = TextOrNil(row.dateofbirth),
+            sex = NormalizeSex(row.sex),
+            height = tonumber(row.height),
+        }
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local row = (Bridge.DB.Sync.fetchAll(
+            'SELECT citizenid, charinfo FROM players WHERE citizenid = @identifier',
+            { ['@identifier'] = identifier }
+        ) or {})[1]
+        if not row then return nil end
+        local citizen = CitizenFromCharinfo(identifier, row.charinfo)
+        citizen.phone = TextOrNil((DecodeJson(row.charinfo) or {}).phone)
+        return citizen
+    end
+
+    return nil
+end
+
+local function LicenceSet(licences)
+    local result = {}
+    if type(licences) == 'table' then
+        for key, value in pairs(licences) do
+            if type(key) == 'string' and (value == true or value == 1) then result[key] = true end
+        end
+    end
+    return result
+end
+
+local function OfflineMetadata(identifier)
+    local row = (Bridge.DB.Sync.fetchAll(
+        'SELECT metadata FROM players WHERE citizenid = @identifier',
+        { ['@identifier'] = identifier }
+    ) or {})[1]
+    if not row then return nil end
+    return DecodeJson(row.metadata) or {}
+end
+
+--- Licence keys a citizen holds, online or offline, e.g. { drive = true }.
+function Bridge.Player.GetLicensesByIdentifier(identifier)
+    EnsureFrameworkReady()
+    if type(identifier) ~= 'string' or identifier == '' then return {} end
+
+    if Bridge.Framework == 'esx' then
+        local rows = Bridge.DB.Sync.fetchAll('SELECT type FROM user_licenses WHERE owner = @owner',
+            { ['@owner'] = identifier }) or {}
+        local result = {}
+        for _, row in ipairs(rows) do
+            if row.type then result[row.type] = true end
+        end
+        return result
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local player = Bridge.Player.GetPlayerByIdentifier(identifier)
+        local metadata = player and player.PlayerData and player.PlayerData.metadata or OfflineMetadata(identifier)
+        return LicenceSet(metadata and metadata.licences)
+    end
+
+    return {}
+end
+
+--- Grants (`has` true) or revokes a licence, online or offline.
+function Bridge.Player.SetLicense(identifier, licence, has)
+    EnsureFrameworkReady()
+    if type(identifier) ~= 'string' or identifier == '' then return false end
+    if type(licence) ~= 'string' or not licence:match('^[%w_]+$') then return false end
+    has = has == true
+
+    if Bridge.Framework == 'esx' then
+        local held = Bridge.Player.GetLicensesByIdentifier(identifier)[licence] == true
+        if has and not held then
+            Bridge.DB.Sync.execute('INSERT INTO user_licenses (type, owner) VALUES (@type, @owner)',
+                { ['@type'] = licence, ['@owner'] = identifier })
+        elseif not has and held then
+            Bridge.DB.Sync.execute('DELETE FROM user_licenses WHERE owner = @owner AND type = @type',
+                { ['@type'] = licence, ['@owner'] = identifier })
+        end
+        return true
+    elseif Bridge.Framework == 'qbcore' or Bridge.Framework == 'qbox' then
+        local player = Bridge.Player.GetPlayerByIdentifier(identifier)
+        local data = player and player.PlayerData
+        if data and player.Functions and player.Functions.SetMetaData then
+            local licences = {}
+            for key, value in pairs(data.metadata and data.metadata.licences or {}) do licences[key] = value end
+            licences[licence] = has
+            player.Functions.SetMetaData('licences', licences)
+            return true
+        end
+        local metadata = OfflineMetadata(identifier)
+        if not metadata then return false end
+        if type(metadata.licences) ~= 'table' then metadata.licences = {} end
+        metadata.licences[licence] = has
+        Bridge.DB.Sync.execute('UPDATE players SET metadata = @metadata WHERE citizenid = @identifier',
+            { ['@metadata'] = json.encode(metadata), ['@identifier'] = identifier })
+        return true
+    end
+
+    return false
 end

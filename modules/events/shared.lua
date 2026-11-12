@@ -45,11 +45,13 @@ local EventMappings = {
         standalone = 'playerDeath'
     },
 
-    -- Job Events
+    -- Job Events. ESX fires esx:setJob on both sides (server-local with the
+    -- player id first); QBCore and Qbox fire the server-local
+    -- QBCore:Server:OnJobUpdate(source, job), also on duty changes.
     JobUpdate = {
         esx = 'esx:setJob',
-        qbcore = 'QBCore:Client:OnJobUpdate',
-        qbox = 'QBCore:Client:OnJobUpdate', -- qbx_core fires the QBCore-compat name only (server/player.lua)
+        qbcore = { server = 'QBCore:Server:OnJobUpdate', client = 'QBCore:Client:OnJobUpdate' },
+        qbox   = { server = 'QBCore:Server:OnJobUpdate', client = 'QBCore:Client:OnJobUpdate' }, -- qbx_core fires the QBCore-compat names only (server/player.lua)
         standalone = 'jobUpdate'
     },
 

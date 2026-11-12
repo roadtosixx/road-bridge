@@ -9,6 +9,9 @@ Bridge.Inventory.System = nil
 Bridge.Inventory.Ready = false
 
 local DetectionCandidates = {
+    { resource = 'codem-inventoryv2', name = 'ox_inventory' },
+    { resource = 'qs-inventory',     name = 'qs-inventory' },
+    { resource = 'jpr-inventory',    name = 'jpr-inventory' },
     { resource = 'ox_inventory',     name = 'ox_inventory' },
     { resource = 'one_inventory',    name = 'one_inventory' },
     { resource = 'jaksam_inventory', name = 'jaksam' },
@@ -21,7 +24,7 @@ local DetectionCandidates = {
 function Bridge.Inventory.DetectSystem()
     local override = Config and Config.InventorySystem
     if override and override ~= '' and override ~= 'auto' then
-        Bridge.Inventory.System = override
+        Bridge.Inventory.System = override == 'codem-inventoryv2' and 'ox_inventory' or override
         Bridge.Inventory.Ready = true
         return
     end

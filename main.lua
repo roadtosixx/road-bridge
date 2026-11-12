@@ -189,3 +189,5 @@ function Bridge.WaitForReady()
 
     return Bridge.Ready == true
 end
+
+return Bridge

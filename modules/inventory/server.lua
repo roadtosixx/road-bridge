@@ -29,6 +29,14 @@ local INFO_BASED_SYSTEMS = {
     -- open and each write seemed to vanish. `metadata` still wins whenever it
     -- actually holds something, so nothing changes for setups that use it.
     tgiann = true,
+    ['qs-inventory'] = true,
+    ['jpr-inventory'] = true,
+}
+
+-- qb-inventory and the inventories that copy its export names and argument order.
+local QB_STYLE_RESOURCES = {
+    ['qb-inventory'] = 'qb-inventory',
+    ['jpr-inventory'] = 'jpr-inventory',
 }
 
 -- ============================================================================
@@ -133,7 +141,17 @@ end
 -- disagree, client and server report a different Bridge.Inventory.System for
 -- the same server. Only list an inventory that has an adapter below; anything
 -- else falls through to the framework-native fallback on both sides.
+--
+-- Inventories that also answer to the ox_inventory / qb-inventory export names
+-- come first, so they are recognised as themselves.
+--
+-- codem-inventoryv2 (Inventory AIO) implements the ox_inventory API: exports,
+-- hooks and events all run under the ox_inventory name. It therefore runs on the
+-- ox_inventory system; Bridge.Inventory.Resource keeps the real resource name.
 local DetectionCandidates = {
+    { resource = 'codem-inventoryv2', name = 'ox_inventory' },
+    { resource = 'qs-inventory',    name = 'qs-inventory' },
+    { resource = 'jpr-inventory',   name = 'jpr-inventory' },
     { resource = 'ox_inventory',    name = 'ox_inventory' },
     { resource = 'one_inventory',   name = 'one_inventory' },
     { resource = 'jaksam_inventory', name = 'jaksam' },
@@ -147,6 +165,13 @@ function Bridge.Inventory.DetectSystem()
     local override = Config and Config.InventorySystem
     if override and override ~= '' and override ~= 'auto' then
         Bridge.Inventory.System = override
+        for _, c in ipairs(DetectionCandidates) do
+            if c.resource == override then
+                Bridge.Inventory.System = c.name
+                Bridge.Inventory.Resource = c.resource
+                break
+            end
+        end
         Bridge.Inventory.Ready = true
         return
     end
@@ -154,6 +179,7 @@ function Bridge.Inventory.DetectSystem()
     for _, c in ipairs(DetectionCandidates) do
         if GetResourceState(c.resource) == 'started' then
             Bridge.Inventory.System = c.name
+            Bridge.Inventory.Resource = c.resource
             Bridge.Inventory.Ready = true
             return
         end
@@ -229,7 +255,9 @@ local InventoryMetadataSupport = {
     jaksam         = 'full',
     tgiann         = 'full',
     ['qb-inventory'] = 'full',
-    codem          = 'partial',
+    ['qs-inventory'] = 'full',
+    ['jpr-inventory'] = 'full',
+    codem          = 'full',
     core_inventory = 'partial',
 }
 
@@ -279,14 +307,20 @@ function Bridge.Inventory.AddItem(source, item, count, metadata)
             exports['codem-inventory']:AddItem(source, item, count, nil, metadata)
         end)
         return success
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' then
+        -- qs AddItem(source, item, amount, slot, info) returns true only when the item was added
+        local success, added = pcall(function()
+            return exports['qs-inventory']:AddItem(source, item, count, nil, next(metadata) ~= nil and metadata or nil)
+        end)
+        return success and added == true
+    elseif QB_STYLE_RESOURCES[sys] then
         local success, ok = pcall(function()
-            return exports['qb-inventory']:AddItem(source, item, count, false, metadata, 'roadphone')
+            return exports[QB_STYLE_RESOURCES[sys]]:AddItem(source, item, count, false, metadata, 'roadphone')
         end)
         return success and ok or false
     end
 
-    -- Framework-native fallback (esx / qbcore / qs-inventory / core_inventory)
+    -- Framework-native fallback (esx / qbcore / core_inventory)
     local fw = FrameworkNative()
     if fw == 'esx' then
         local xPlayer = Bridge.FrameworkObject.GetPlayerFromId(source)
@@ -343,9 +377,14 @@ function Bridge.Inventory.RemoveItem(source, item, count, metadata)
             exports['codem-inventory']:RemoveItem(source, item, count)
         end)
         return success
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' then
         local success, ok = pcall(function()
-            return exports['qb-inventory']:RemoveItem(source, item, count, false, 'roadphone')
+            return exports['qs-inventory']:RemoveItem(source, item, count)
+        end)
+        return success and (ok ~= false)
+    elseif QB_STYLE_RESOURCES[sys] then
+        local success, ok = pcall(function()
+            return exports[QB_STYLE_RESOURCES[sys]]:RemoveItem(source, item, count, false, 'roadphone')
         end)
         return success and ok or false
     end
@@ -409,9 +448,14 @@ function Bridge.Inventory.RemoveItemFromSlot(source, item, count, slot)
             exports['codem-inventory']:RemoveItem(source, item, count, slot)
         end)
         return success
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' then
         local success, ok = pcall(function()
-            return exports['qb-inventory']:RemoveItem(source, item, count, slot, 'roadphone')
+            return exports['qs-inventory']:RemoveItem(source, item, count, slot)
+        end)
+        return success and (ok ~= false)
+    elseif QB_STYLE_RESOURCES[sys] then
+        local success, ok = pcall(function()
+            return exports[QB_STYLE_RESOURCES[sys]]:RemoveItem(source, item, count, slot, 'roadphone')
         end)
         return success and ok or false
     elseif sys == 'core_inventory' then
@@ -470,6 +514,25 @@ function Bridge.Inventory.GetItemCount(source, item)
             return exports['codem-inventory']:GetItemsTotalAmount(source, item)
         end)
         return success and (total or 0) or 0
+    elseif sys == 'qs-inventory' then
+        local success, total = pcall(function()
+            return exports['qs-inventory']:GetItemTotalAmount(source, item)
+        end)
+        return success and (tonumber(total) or 0) or 0
+    elseif sys == 'jpr-inventory' then
+        -- jpr-inventory has no count export; add up the stacks
+        local success, stacks = pcall(function()
+            return exports['jpr-inventory']:GetItemsByName(source, item)
+        end)
+        local total = 0
+        if success and type(stacks) == 'table' then
+            for _, stack in pairs(stacks) do
+                if type(stack) == 'table' then
+                    total = total + (tonumber(stack.amount or stack.count) or 1)
+                end
+            end
+        end
+        return total
     elseif sys == 'qb-inventory' then
         local success, total = pcall(function()
             return exports['qb-inventory']:GetItemCount(source, item)
@@ -520,9 +583,14 @@ function Bridge.Inventory.HasItem(source, item, count)
             return exports['codem-inventory']:HasItem(source, item, count)
         end)
         if success then return ok and true or false end
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' then
         local success, ok = pcall(function()
-            return exports['qb-inventory']:HasItem(source, item, count)
+            return exports['qs-inventory']:HasItem(source, { [item] = count })
+        end)
+        if success then return ok and true or false end
+    elseif QB_STYLE_RESOURCES[sys] then
+        local success, ok = pcall(function()
+            return exports[QB_STYLE_RESOURCES[sys]]:HasItem(source, item, count)
         end)
         if success then return ok and true or false end
     end
@@ -562,9 +630,10 @@ function Bridge.Inventory.GetItem(source, item)
             return exports['codem-inventory']:GetItemByName(source, item)
         end)
         return success and itemData or nil
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' or QB_STYLE_RESOURCES[sys] then
+        local resource = QB_STYLE_RESOURCES[sys] or sys
         local success, itemData = pcall(function()
-            return exports['qb-inventory']:GetItemByName(source, item)
+            return exports[resource]:GetItemByName(source, item)
         end)
         return success and itemData or nil
     end
@@ -606,6 +675,18 @@ function Bridge.Inventory.GetInventory(source)
             return exports['tgiann-inventory']:GetPlayerItems(source)
         end)
         return success and inventory or {}
+    elseif sys == 'qs-inventory' or sys == 'jpr-inventory' then
+        -- Slot-keyed table of items
+        local success, inventory = pcall(function()
+            return exports[sys]:GetInventory(source)
+        end)
+        if success and type(inventory) == 'table' then return inventory end
+    elseif sys == 'codem' then
+        -- codem: GetInventory(identifier, source)
+        local success, inventory = pcall(function()
+            return exports['codem-inventory']:GetInventory(nil, source)
+        end)
+        if success and type(inventory) == 'table' then return inventory end
     end
 
     local fw = FrameworkNative()
@@ -651,9 +732,14 @@ function Bridge.Inventory.CanCarryItem(source, item, count)
             return exports['tgiann-inventory']:CanCarryItem(source, item, count)
         end)
         return success and canCarry or false
-    elseif sys == 'qb-inventory' then
+    elseif sys == 'qs-inventory' then
         local success, canCarry = pcall(function()
-            return exports['qb-inventory']:CanAddItem(source, item, count)
+            return exports['qs-inventory']:CanCarryItem(source, item, count)
+        end)
+        return success and canCarry or false
+    elseif QB_STYLE_RESOURCES[sys] then
+        local success, canCarry = pcall(function()
+            return exports[QB_STYLE_RESOURCES[sys]]:CanAddItem(source, item, count)
         end)
         return success and canCarry or false
     end
@@ -795,6 +881,66 @@ Adapters['qb-inventory'] = {
     end,
 }
 
+-- Both Quasar inventories (Inventory and Advanced Inventory) run as qs-inventory
+-- with the same exports; per-slot data lives in `info`.
+Adapters['qs-inventory'] = {
+    readSlot = function(src, slot)
+        return exports['qs-inventory']:GetItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['qs-inventory']:GetItemsByName(src, itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        exports['qs-inventory']:SetItemMetadata(src, slot, meta)
+        return true
+    end,
+}
+
+-- jpr-inventory documents SetItemData(source, itemName, key, val) without a
+-- slot: it writes to the first item of that name, which is the wrong phone as
+-- soon as a player carries two. The slot-exact way its docs describe is to
+-- change the item in the inventory table and store the table again.
+local function JprWriteMetadata(src, slot, meta)
+    local items = exports['jpr-inventory']:GetInventory(src)
+    if type(items) ~= 'table' then return false end
+
+    local target = items[slot]
+    if type(target) ~= 'table' or (target.slot ~= nil and tostring(target.slot) ~= tostring(slot)) then
+        target = nil
+        for _, entry in pairs(items) do
+            if type(entry) == 'table' and tostring(entry.slot) == tostring(slot) then
+                target = entry
+                break
+            end
+        end
+    end
+    if not target then return false end
+
+    target.info = meta
+
+    if Bridge.Framework == 'esx' then
+        exports['jpr-inventory']:SetPlayerData('items', items, src)
+        return true
+    end
+
+    local player = GetQBLikePlayer(src)
+    if not player then return false end
+    player.Functions.SetPlayerData('items', items)
+    return true
+end
+
+Adapters['jpr-inventory'] = {
+    readSlot = function(src, slot)
+        return exports['jpr-inventory']:GetItemBySlot(src, slot)
+    end,
+    listByName = function(src, itemName)
+        return exports['jpr-inventory']:GetItemsByName(src, itemName)
+    end,
+    writeMetadata = function(src, itemName, slot, meta)
+        return JprWriteMetadata(src, slot, meta)
+    end,
+}
+
 Adapters.core_inventory = {
     readSlot = function(src, slot)
         return exports['core_inventory']:getItemBySlot(src, slot)
@@ -865,6 +1011,16 @@ end
 -- not enough to drown the console.
 local reportedFailures = {}
 
+-- These inventories return nothing from their metadata write, so a write that
+-- was dropped looks like one that worked. Their writes are read back until one
+-- has been seen on the item; after that the check costs nothing.
+local READ_BACK_SYSTEMS = {
+    ['qs-inventory'] = true,
+    ['jpr-inventory'] = true,
+    codem = true,
+}
+local provenWrites = {}
+
 --- Call an adapter primitive. Returns nil when the inventory is missing the
 --- primitive or the call raised — never throws at the caller.
 local function callAdapter(name, ...)
@@ -904,7 +1060,7 @@ end
 -- ============================================================================
 
 --- All items of a name the player carries, normalised to
---- { slot, name, metadata } — metadata already resolved from metadata/info.
+--- { slot, name, count, metadata } — metadata already resolved from metadata/info.
 function Bridge.Inventory.GetAllItemsByName(source, itemName)
     EnsureReady()
 
@@ -921,6 +1077,7 @@ function Bridge.Inventory.GetAllItemsByName(source, itemName)
                 results[#results + 1] = {
                     slot = slot,
                     name = item.name or itemName,
+                    count = tonumber(item.count or item.amount) or 1,
                     metadata = Bridge.Inventory.ItemMetadata(item),
                 }
             end
@@ -982,7 +1139,24 @@ function Bridge.Inventory.UpdateItemMetadata(source, itemName, slot, newMetadata
 
     if not slot then return false end
 
-    return callAdapter('writeMetadata', source, itemName, slot, newMetadata) and true or false
+    if not callAdapter('writeMetadata', source, itemName, slot, newMetadata) then return false end
+
+    local sys = System()
+    if READ_BACK_SYSTEMS[sys] and not provenWrites[sys] and type(newMetadata) == 'table' and next(newMetadata) ~= nil then
+        if not MetadataLanded(callAdapter('readSlot', source, slot), newMetadata) then
+            local key = sys .. '.readBack'
+            if not reportedFailures[key] then
+                reportedFailures[key] = true
+                print(('^1[Bridge Inventory] %s accepted a metadata write for %s (slot %s) but the item does not ' ..
+                    'carry it afterwards. Phone data cannot be saved on this inventory version.^7')
+                    :format(tostring(sys), tostring(itemName), tostring(slot)))
+            end
+            return false
+        end
+        provenWrites[sys] = true
+    end
+
+    return true
 end
 
 --- Kept for callers using the older name/argument order.
@@ -1005,6 +1179,17 @@ function Bridge.Inventory.RegisterUseableItem(itemName, callback)
             slot = item.slot,
             metadata = Bridge.Inventory.ItemMetadata(item),
         }
+    end
+
+    -- qs-inventory hands its own callback the used item with slot and info on
+    -- every framework, and registers it with QBCore/Qbox itself.
+    if System() == 'qs-inventory' then
+        local registered = pcall(function()
+            exports['qs-inventory']:CreateUsableItem(itemName, function(source, item)
+                callback(source, normalise(item))
+            end)
+        end)
+        if registered then return end
     end
 
     if Bridge.Framework == 'esx' then

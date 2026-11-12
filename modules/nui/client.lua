@@ -14,9 +14,10 @@ Bridge.NUI = {}
 
 -- Thin SendNUIMessage wrapper. Sends { event = nuiEvent, <payload fields> }.
 function Bridge.NUI.Send(nuiEvent, payload)
-    payload = payload or {}
-    payload.event = nuiEvent
-    SendNUIMessage(payload)
+    local message = {}
+    for key, value in pairs(payload or {}) do message[key] = value end
+    message.event = nuiEvent
+    SendNUIMessage(message)
 end
 
 -- Server -> NUI relay. Forwards a single server-event argument to NUI under
@@ -47,7 +48,8 @@ function Bridge.NUI.Proxy(serverCb, ...)
             end
         end
         Bridge.TriggerCallback(serverCb, function(result)
-            cb(result or { ok = false, error = 'no_response' })
+            if result == nil then result = { ok = false, error = 'no_response' } end
+            cb(result)
         end, table.unpack(args, 1, n))
     end
 end

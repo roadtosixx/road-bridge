@@ -1,3 +1,31 @@
+Bridge.Callback = {}
+
+local Callback = Bridge.Callback
+Callback.Timeout = 10000
+Callback.EventPrefix = GetCurrentResourceName() .. ':bridge:callback:'
+
+-- Clear the captured callback after completion; timeout closures can outlive it.
+function Callback.Once(callback, timeout, name)
+    local answered = false
+    local function finish(...)
+        if answered then return end
+        answered = true
+        local fn = callback
+        callback = nil
+        fn(...)
+    end
+
+    if timeout then
+        SetTimeout(timeout, function()
+            if answered then return end
+            print(('^3[Bridge Callback]^7 Callback "%s" timed out'):format(name))
+            finish(nil)
+        end)
+    end
+
+    return finish
+end
+
 local esxCallbacks
 
 function Bridge.GetESXCallbacks()
